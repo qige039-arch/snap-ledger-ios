@@ -1,0 +1,11 @@
+# 统一换行符：Windows 上默认会把文件转成 CRLF，
+# 而 GitHub Actions 的 runner 是 Linux/macOS，shell 脚本和 yml 带 CRLF 会出怪问题。
+* text=auto eol=lf
+
+*.swift  text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.md     text eol=lf
+*.sh     text eol=lf
+*.py     text eol=lf
+*.json   text eol=lf
