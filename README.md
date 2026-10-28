@@ -9,6 +9,28 @@ PWA 版的「原生重做」。目标只有一个：**自己家两台 iPhone 用
 
 ---
 
+## 当前状态（2026-10-28 晚）
+
+| 项 | 状态 |
+|---|---|
+| 云端编译（GitHub macOS runner） | ✅ 通过，`run 40678270023` |
+| 25 条解析回归用例 | ✅ 全绿（4 个 test 方法遍历 25 条用例，0 失败） |
+| 未签名 ipa | ✅ 已产出，210 KB，在 `dist/SnapLedger-unsigned.ipa` |
+| App Intents 是否真进包 | ✅ ipa 里有 `Metadata.appintents/`，说明快捷指令动作会被系统识别 |
+| App 图标 | ✅ 已生成，`AppIcon60x60@2x.png` 在包里 |
+| **真机安装** | ⬜ 待你在 Windows 上跑 Sideloadly |
+| **UI / 相册 / 同步真机联调** | ⬜ 未做 |
+
+第一次编译只报了 **3 个错**，都已修（记在这里，避免你以为是别的问题）：
+
+1. `IntentFile.data` 是 `Data` 不是 `Data?`，不能写 `guard let data = image.data`
+2. `d.sync?.pushedAt = max(d.sync?.pushedAt ?? 0, x)` 触发 Swift 独占性检查
+   （`overlapping accesses to 'd.sync'`）→ 先取局部变量再赋值
+3. `AppShortcut` 的 phrase 里只能插值 `AppEntity` / `AppEnum`，
+   写成 `"记 \(\.$text)"` 报 `Invalid parameter type` → 短语里不带参数
+
+---
+
 ## 一、这条路为什么值得走
 
 | | PWA（现在） | 原生 App |
@@ -91,6 +113,16 @@ SnapLedger/
 git add -A && git commit -m "改了什么" && git push
 ```
 
+> **push 报 `Connection was reset` 时**：这台机器到 `github.com:443` 时通时不通
+> （`api.github.com` 一直可用）。用兜底通道提交，效果等价于一次普通提交，也会触发 CI：
+>
+> ```bash
+> python tools/push_via_api.py -m "改了什么"
+> ```
+>
+> 走完这条路本地会和远端分叉。等 github.com 能连上时，先
+> `git fetch origin && git reset --hard origin/main` 对齐，别直接 push。
+
 > **公开仓库的 macOS 构建免费且不限分钟**。代码里没有家庭码、没有服务器密钥——
 > 家庭码是运行时才填的，公开不泄露任何东西。
 > 实在不想公开也行：私有仓库每月送 2000 分钟，macOS 按 10 倍扣，等于 **200 分钟**；
@@ -108,6 +140,13 @@ Actions → `build-ipa` → **Run workflow**，约 4 分钟。它做四件事：
 **测试不过就不会产出 ipa**——这是故意的，避免你装上一个识别错金额的版本。
 
 ### ③ Windows 上签名安装
+
+ipa 有两种拿法，选一个：
+
+- **已经拉好了**：`dist/SnapLedger-unsigned.ipa`（210 KB）
+- **重新构建后**：Actions 运行页面底部下载 `SnapLedger-unsigned-ipa`
+
+然后：
 
 1. 装 **iTunes 桌面版**（Apple 官网下载，**不要** Microsoft Store 版）和 [Sideloadly](https://sideloadly.io)
 2. iPhone 数据线连电脑，手机上点「信任」
