@@ -1,0 +1,110 @@
+# 零成本构建：在 GitHub 的 macOS 机器上编译，产出未签名 ipa，回 Windows 用免费 Apple ID 签名安装
+#
+# 为什么这么绕：SwiftUI 只能在 macOS 上编译，而你没有 Mac。
+# 公开仓库的 macOS runner 是免费的（不限分钟）；私有仓库每月只有 200 分钟 macOS 额度
+# （2000 分钟 ÷ 10 倍率），也够用，但用完就停到下月。
+#
+# 触发方式：Actions 页面点 Run workflow，或 push 到 main。
+
+name: build-ipa
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "SnapLedger/**"
+      - "project.yml"
+      - ".github/workflows/ios.yml"
+
+concurrency:
+  group: build-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 打印环境
+        run: |
+          xcodebuild -version
+          sw_vers
+
+      - name: 安装 XcodeGen 与日志美化
+        run: brew install xcodegen xcbeautify
+
+      - name: 生成 Xcode 工程
+        run: xcodegen generate && ls -d SnapLedger.xcodeproj
+
+      - name: 挑一个可用模拟器
+        id: sim
+        run: |
+          # 不写死 "iPhone 16"：runner 的 Xcode 版本一变设备名就没了，workflow 会莫名其妙挂掉。
+          # 必须写成单行 python —— YAML 块标量里插入顶格代码会把后面的内容截断（本地已验证踩坑）。
+          UDID=$(xcrun simctl list devices available -j | /usr/bin/python3 -c "import json,sys;d=json.load(sys.stdin);a=[v['udid'] for k,vs in d['devices'].items() if 'SimRuntime.iOS-' in k for v in vs if v.get('isAvailable') and v['name'].startswith('iPhone')];print(a[0] if a else '')")
+          if [ -z "$UDID" ]; then echo "找不到可用 iPhone 模拟器" >&2; exit 1; fi
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          echo "selected=$UDID"
+
+      - name: 跑解析回归测试（25 条）
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project SnapLedger.xcodeproj \
+            -scheme SnapLedger \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcbeautify
+
+      - name: 归档（不签名）
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project SnapLedger.xcodeproj \
+            -scheme SnapLedger \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/SnapLedger.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/dd-release" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            | xcbeautify
+
+      - name: 打成未签名 ipa
+        run: |
+          cd "$RUNNER_TEMP"
+          APP=$(find SnapLedger.xcarchive/Products -maxdepth 3 -name "*.app" | head -1)
+          if [ -z "$APP" ]; then echo "归档里没找到 .app" >&2; exit 1; fi
+          echo "app = $APP"
+          rm -rf Payload SnapLedger-unsigned.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          /usr/bin/zip -qry SnapLedger-unsigned.ipa Payload
+          ls -lh SnapLedger-unsigned.ipa
+          # 顺手确认一下二进制真的在，避免拿到一个空壳
+          unzip -l SnapLedger-unsigned.ipa | head -12
+
+      - name: 上传 ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: SnapLedger-unsigned-ipa
+          path: ${{ runner.temp }}/SnapLedger-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 失败时留住构建日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            ${{ runner.temp }}/dd/Logs/**
+            ${{ runner.temp }}/dd-release/Logs/**
+          if-no-files-found: ignore
+          retention-days: 7

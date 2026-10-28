@@ -1,0 +1,97 @@
+# XcodeGen 工程定义
+#
+# 为什么用 XcodeGen 而不是手写 .xcodeproj：
+#   1. .xcodeproj 是一坨 UUID 二进制式 JSON，手写必错，且没法 code review；
+#   2. 你没有 Mac，工程必须能在 GitHub Actions 的 macOS 机器上「从零生成」；
+#   3. 以后加文件不用来回改工程文件，xcodegen 每次重扫目录即可。
+#
+# 本地（有 Mac 时）/ CI 都是同一条命令：
+#   brew install xcodegen && xcodegen generate && open SnapLedger.xcodeproj
+
+name: SnapLedger
+
+options:
+  bundleIdPrefix: com.familysnap
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    # 免费 Apple ID 配 Swift 6 严格并发会多出一批与功能无关的 isolation 报错，
+    # 先把语言版本钉在 5；等真机跑顺了再单独迁移。
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    # 免费账号没有 distribution 证书，签名一律交给 Sideloadly 在 Windows 上做，
+    # 这里只负责产出「未签名的 .app」。
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: NO
+    CODE_SIGNING_ALLOWED: NO
+
+targets:
+  SnapLedger:
+    type: application
+    platform: iOS
+    sources:
+      - path: SnapLedger
+        excludes:
+          # 单测文件只进测试 target，别混进 App 包
+          - "ParserTests.swift"
+    info:
+      # 放在 SnapLedger/ 之外，避免被 sources 当资源扫进去。
+      # 特意放在根目录而不是 Supporting/ —— XcodeGen 写 plist 时不会自动建父目录，
+      # 而 Info.plist 被 .gitignore 忽略、clone 下来目录就是空的，CI 会直接失败。
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: 家庭记账
+        CFBundleShortVersionString: "0.1"
+        CFBundleVersion: "1"
+        # 少了 UILaunchScreen，iOS 会用兼容模式跑，界面变小、有黑边
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        # 不加这一行，第一次读相册直接崩
+        NSPhotoLibraryUsageDescription: 用于读取你刚截的屏并识别金额。图片只在本机识别，不会上传到任何服务器。
+        NSPhotoLibraryAddUsageDescription: 仅在你自己点保存时写入记账截图。
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.familysnap.snapledger
+        PRODUCT_NAME: SnapLedger
+        TARGETED_DEVICE_FAMILY: "1"
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+
+  SnapLedgerTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - SnapLedger/ParserTests.swift
+    dependencies:
+      - target: SnapLedger
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.familysnap.snapledger.tests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
+
+schemes:
+  SnapLedger:
+    build:
+      targets:
+        SnapLedger: all
+        SnapLedgerTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: false
+      targets:
+        - name: SnapLedgerTests
+    archive:
+      config: Release
