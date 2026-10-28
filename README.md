@@ -1,11 +1,9 @@
-# 家庭记账 · iOS 原生版（v0.1 骨架）
+# 家庭记账 · iOS 原生版
 
 PWA 版的「原生重做」。目标只有一个：**自己家两台 iPhone 用得更顺手**，不做上架。
 
-> 重要声明：这些 Swift 文件是在 Windows 上写的，**没有经过 Xcode 编译**。
-> 逻辑（解析引擎、同步协议）是从已经跑过 39 条测试的 JS 代码逐行移植的，
-> 但 Swift 编译期的问题（类型推断、并发标注、个别 API 签名）必须真机编译一遍。
-> 预计第一次编译要修 30–60 分钟，这是正常的，不是方案有问题。
+> 这些 Swift 文件是在 Windows 上写的，编译由 GitHub 的 macOS runner 完成。
+> 逻辑（解析引擎、同步协议）是从已经跑过 39 条测试的 JS 代码逐行移植的。
 
 ---
 
@@ -13,21 +11,37 @@ PWA 版的「原生重做」。目标只有一个：**自己家两台 iPhone 用
 
 | 项 | 状态 |
 |---|---|
-| 云端编译（GitHub macOS runner） | ✅ 通过，`run 40678270023` |
+| 云端编译（GitHub macOS runner） | ✅ 通过，`run 40690869384`（UI 重做版） |
 | 25 条解析回归用例 | ✅ 全绿（4 个 test 方法遍历 25 条用例，0 失败） |
-| 未签名 ipa | ✅ 已产出，210 KB，在 `dist/SnapLedger-unsigned.ipa` |
+| 未签名 ipa | ✅ 已产出，403 KB，在 `dist/SnapLedger-unsigned.ipa` |
 | App Intents 是否真进包 | ✅ ipa 里有 `Metadata.appintents/`，说明快捷指令动作会被系统识别 |
 | App 图标 | ✅ 已生成，`AppIcon60x60@2x.png` 在包里 |
 | **真机安装** | ⬜ 待你在 Windows 上跑 Sideloadly |
 | **UI / 相册 / 同步真机联调** | ⬜ 未做 |
 
-第一次编译只报了 **3 个错**，都已修（记在这里，避免你以为是别的问题）：
+### 界面结构（v0.2 重做）
+
+四个 tab，对应网页版的四页：
+
+| Tab | 内容 |
+|---|---|
+| 记账 | 本月渐变汇总卡（支出大字 + 收入/结余/笔数）+ 聊天流 + 待确认卡片 + 输入栏 |
+| 账本 | 日/月/年三粒度、左右翻页、分组列表；**点任意一条可直接改金额/分类/方向，或删掉**；年视图带月度占比条，点月份跳到该月 |
+| 统计 | 支出/收入切换、总计·日均·最大一笔、Swift Charts 柱状趋势（月→每天，年→12 个月）、分类排行带百分比 |
+| 我的 | 渐变身份卡、邀请码大字 + 一键复制、同步状态、相册权限告警（仅选中的照片会提示去设置）、关于页 |
+
+设计系统在 `DesignSystem.swift`：动态色（浅色/深色两套）、卡片、自绘分段控件、分类配色、
+金额统一 rounded + 等宽数字（滚动不抖）。
+
+### 曾经修掉的编译错误（记在这里，避免你以为是别的问题）
 
 1. `IntentFile.data` 是 `Data` 不是 `Data?`，不能写 `guard let data = image.data`
 2. `d.sync?.pushedAt = max(d.sync?.pushedAt ?? 0, x)` 触发 Swift 独占性检查
    （`overlapping accesses to 'd.sync'`）→ 先取局部变量再赋值
 3. `AppShortcut` 的 phrase 里只能插值 `AppEntity` / `AppEnum`，
    写成 `"记 \(\.$text)"` 报 `Invalid parameter type` → 短语里不带参数
+4. `View.body` 是 `@ViewBuilder`，里面不能写 `let` + 显式 `return`
+   （报 `Cannot use explicit 'return' statement in the body of result builder`）
 
 ---
 

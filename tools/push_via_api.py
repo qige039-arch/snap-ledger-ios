@@ -84,7 +84,7 @@ def changed_files():
 
 
 def main():
-    args = sys.argv[1:]
+    args = [a for a in sys.argv[1:] if a != "--no-build"]
     msg = "同步改动"
     if "-m" in args:
         i = args.index("-m")
@@ -126,6 +126,9 @@ def main():
     req("PATCH", f"{API}/git/refs/heads/main", {"sha": commit["sha"], "force": False})
     print("新 commit:", commit["sha"][:10])
 
+    if "--no-build" in sys.argv[1:]:
+        print("跳过 workflow（--no-build）")
+        return
     req("POST", f"{API}/actions/workflows/ios.yml/dispatches", {"ref": "main"})
     print("已触发 workflow")
 
