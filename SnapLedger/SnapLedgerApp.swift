@@ -8,7 +8,7 @@ import SwiftUI
 struct SnapLedgerApp: App {
     var body: some Scene {
         WindowGroup {
-            ChatView()
+            RootView()
         }
     }
 }

@@ -11,7 +11,7 @@ git push 的兜底通道。
     python tools/push_via_api.py 文件1 文件2 # 只提交指定文件
 
 注意：
-- 只处理新增/修改，不处理删除（仓库里几乎不会有删文件的需求，真有就用网页删）。
+- 支持新增 / 修改 / 删除（删除通过 base_tree + sha:null 实现）。
 - 走完这条路后，本地与远端会分叉。等 github.com 能连上时执行一次
   `git fetch origin && git reset --hard origin/main` 把本地对齐，别直接 push。
 """
@@ -103,7 +103,9 @@ def main():
     for rel in files:
         full = os.path.join(ROOT, rel)
         if not os.path.exists(full):
-            print(f"  跳过（本地不存在，可能是删除）: {rel}")
+            # base_tree 里把 sha 置为 null 就是删除这个路径
+            entries.append({"path": rel, "mode": "100644", "type": "blob", "sha": None})
+            print(f"  - {rel}  (删除)")
             continue
         with open(full, "rb") as f:
             raw = f.read()

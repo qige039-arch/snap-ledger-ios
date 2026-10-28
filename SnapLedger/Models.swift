@@ -205,11 +205,18 @@ final class LedgerStore: ObservableObject {
         return r
     }
 
-    func update(id: String, amount: Double? = nil, category: String? = nil, emoji: String? = nil) {
+    func update(id: String,
+                amount: Double? = nil,
+                category: String? = nil,
+                emoji: String? = nil,
+                type: String? = nil,
+                note: String? = nil) {
         guard let i = db.records.firstIndex(where: { $0.id == id }) else { return }
         if let v = amount { db.records[i].amount = v }
         if let v = category { db.records[i].category = v }
         if let v = emoji { db.records[i].emoji = v }
+        if let v = type { db.records[i].type = v }
+        if let v = note { db.records[i].note = v }
         db.records[i].at = Date().timeIntervalSince1970 * 1000
         persist()
         SyncEngine.shared.dirty()
