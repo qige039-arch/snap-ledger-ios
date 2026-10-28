@@ -15,6 +15,9 @@ struct BookView: View {
     @State private var anchor = Date()
     @State private var editing: LedgerRecord?
     @State private var showAdd = false
+    @State private var addDate: Date?          // 从空格子补账时带上的日期
+    @State private var heatPick: String?       // 日历上选中的那格
+    @State private var missingDay: Date?       // 点了却没有任何记录的那天
 
     private let scopeTitles = ["日", "月", "年"]
 
@@ -60,36 +63,83 @@ struct BookView: View {
         VStack(spacing: 0) {
             header
 
-            ScrollView {
-                LazyVStack(spacing: 14) {
-                    ScopeSegmented(titles: scopeTitles, index: $scopeIndex)
-                        .padding(.horizontal, 16)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 14) {
+                        ScopeSegmented(titles: scopeTitles, index: $scopeIndex)
+                            .padding(.horizontal, 16)
 
-                    HeroCard(label: scopeIndex == 0 ? "当日支出" : (scopeIndex == 1 ? "本月支出" : "本年支出"),
-                             amount: totals.expense,
-                             income: totals.income,
-                             balance: totals.income - totals.expense,
-                             footValue: "\(store.count(from: range.start, to: range.end))")
-                        .padding(.horizontal, 16)
+                        HeroCard(label: scopeIndex == 0 ? "当日支出" : (scopeIndex == 1 ? "本月支出" : "本年支出"),
+                                 amount: totals.expense,
+                                 income: totals.income,
+                                 balance: totals.income - totals.expense,
+                                 footValue: "\(store.count(from: range.start, to: range.end))")
+                            .padding(.horizontal, 16)
 
-                    content
+                        if scopeIndex == 1 {
+                            MonthHeatCalendar(anchor: anchor, selectedKey: $heatPick) { d in
+                                pickDay(d, proxy: proxy)
+                            }
+                            .padding(.horizontal, 16)
+                        }
+
+                        content
+                    }
+                    .padding(.top, 4)
+                    .padding(.bottom, 28)
                 }
-                .padding(.top, 4)
-                .padding(.bottom, 28)
+                .animation(.easeOut(duration: 0.22), value: anchor)
+                .animation(.easeOut(duration: 0.22), value: scopeIndex)
             }
-            .animation(.easeOut(duration: 0.22), value: anchor)
-            .animation(.easeOut(duration: 0.22), value: scopeIndex)
         }
         .background(Theme.bg)
+        .onChange(of: anchor) { _, _ in
+            heatPick = nil
+            missingDay = nil
+        }
+        .onChange(of: scopeIndex) { _, _ in
+            heatPick = nil
+            missingDay = nil
+        }
         .sheet(item: $editing) { rec in
             RecordEditor(record: rec)
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
-        .sheet(isPresented: $showAdd) {
-            RecordEditor(record: nil)
+        .sheet(isPresented: $showAdd, onDismiss: { addDate = nil }) {
+            RecordEditor(record: nil, presetDate: addDate)
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
+        }
+    }
+
+    // MARK: 点日历某一格
+
+    private func pickDay(_ d: HeatDay, proxy: ScrollViewProxy) {
+        // 前后补位的日子：直接翻到那个月，不折腾滚动
+        if !d.inMonth {
+            anchor = d.day
+            heatPick = nil
+            missingDay = nil
+            return
+        }
+
+        heatPick = d.key
+        missingDay = nil
+
+        let groups = store.dayGroups(from: range.start, to: range.end)
+        if groups.contains(where: { $0.key == d.key }) {
+            withAnimation(.easeInOut(duration: 0.28)) {
+                proxy.scrollTo(d.key, anchor: .top)
+            }
+        } else {
+            // 这天是空的——比起什么都不发生，直接把「补一笔」摆到面前
+            missingDay = d.day
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+                withAnimation(.easeInOut(duration: 0.28)) {
+                    proxy.scrollTo("missing", anchor: .top)
+                }
+            }
         }
     }
 
@@ -155,15 +205,59 @@ struct BookView: View {
             }
         } else {
             let groups = store.dayGroups(from: range.start, to: range.end)
+
+            if let md = missingDay {
+                missingCard(md).id("missing")
+            }
+
             if groups.isEmpty {
                 emptyState
             } else {
                 ForEach(groups) { g in
                     groupCard(g, showHeader: true)
                         .padding(.horizontal, 16)
+                        .id(g.key)
                 }
             }
         }
+    }
+
+    /// 点了日历上的空白格：不弹窗、不报错，直接给一条补账入口
+    private func missingCard(_ day: Date) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "calendar.badge.plus")
+                .font(.system(size: 17, weight: .light))
+                .foregroundStyle(Theme.expense)
+                .frame(width: 38, height: 38)
+                .background(Theme.expense.opacity(0.1),
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(Fmt.dayLong(day) + " 没有记录")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(Theme.ink)
+                Text("是漏记了，还是这天真的没花钱？")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.ink3)
+            }
+
+            Spacer(minLength: 6)
+
+            Button {
+                addDate = day
+                showAdd = true
+            } label: {
+                Text("补一笔")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(Theme.brand, in: Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+        .cardStyle(padding: 12)
+        .padding(.horizontal, 16)
     }
 
     /// 年视图：12 个月的可点行，点进去直接落到那个月
@@ -347,6 +441,7 @@ struct RecordLine: View {
 
 struct RecordEditor: View {
     let record: LedgerRecord?
+    var presetDate: Date? = nil     // 从日历空格子补账时，把日期定在那天
 
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var store = LedgerStore.shared
@@ -368,6 +463,11 @@ struct RecordEditor: View {
                 VStack(alignment: .leading, spacing: 16) {
                     // 金额
                     VStack(spacing: 6) {
+                        if let d = presetDate, record == nil {
+                            Text("补记 " + Fmt.dayLong(d))
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(Theme.brand)
+                        }
                         Text(isIncome ? "收入金额" : "支出金额")
                             .font(.system(size: 12))
                             .foregroundStyle(Theme.ink3)
@@ -481,12 +581,26 @@ struct RecordEditor: View {
         if let r = record {
             store.update(id: r.id, amount: v, category: category, emoji: emoji, type: type)
         } else {
-            var rec = LedgerRecord(ts: Date().timeIntervalSince1970 * 1000,
-                                   type: type, amount: v,
+            var rec = LedgerRecord(ts: stamp(), type: type, amount: v,
                                    category: category, emoji: emoji)
             rec.member = store.selfMemberId
             store.add(rec)
         }
         dismiss()
+    }
+
+    /// 补账时用那天的日期 + 此刻的时分秒，否则一律记成现在
+    private func stamp() -> Double {
+        let now = Date()
+        guard record == nil, let d = presetDate else {
+            return now.timeIntervalSince1970 * 1000
+        }
+        let cal = Fmt.cal
+        let t = cal.dateComponents([.hour, .minute, .second], from: now)
+        var c = cal.dateComponents([.year, .month, .day], from: d)
+        c.hour = t.hour
+        c.minute = t.minute
+        c.second = t.second
+        return (cal.date(from: c) ?? now).timeIntervalSince1970 * 1000
     }
 }
