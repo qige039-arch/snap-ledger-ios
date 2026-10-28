@@ -127,8 +127,11 @@ struct SnapLedgerShortcuts: AppShortcutsProvider {
         AppShortcut(
             intent: AddRecordIntent(),
             phrases: [
+                // 注意：AppShortcut 的 phrase 里只能插值 AppEntity / AppEnum，
+                // 写成 "记 \(\.$text)" 会报 "Invalid parameter type. AppEntity and AppEnum
+                // are the only allowed types for text"。所以这里不带参数。
                 "用 \(.applicationName) 记一笔",
-                "\(.applicationName) 记 \(\.$text)"
+                "\(.applicationName) 记账"
             ],
             shortTitle: "记一笔",
             systemImageName: "square.and.pencil"
