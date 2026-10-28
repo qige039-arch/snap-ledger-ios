@@ -19,6 +19,7 @@ struct MeView: View {
     @State private var err: String?
     @State private var photoStatus = "读取中…"
     @State private var showAbout = false
+    @State private var showService = false
     @State private var showCodeCopied = false
 
     private var code: String { store.db.sync?.code ?? "" }
@@ -42,6 +43,7 @@ struct MeView: View {
                 familyCard
                 captureCard
                 identityCard
+                serviceCard
                 aboutCard
             }
             .padding(.horizontal, 16)
@@ -56,6 +58,12 @@ struct MeView: View {
             Text(err ?? "")
         }
         .sheet(isPresented: $showAbout) { AboutSheet() }
+        .sheet(isPresented: $showService) {
+            ServiceSheet {
+                // 改完地址/分享码，已连家庭的话立刻重连一次，不用等 45 秒轮询
+                if store.db.sync?.isOn == true { sync.now() }
+            }
+        }
     }
 
     // MARK: 头像卡
@@ -256,6 +264,46 @@ struct MeView: View {
         }
     }
 
+    // MARK: 服务设置
+
+    private var serviceCard: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            cardTitle("服务设置", icon: "antenna.radiowaves.left.and.right")
+
+            Button {
+                showService = true
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("同步服务器")
+                            .font(.system(size: 13.5))
+                            .foregroundStyle(Theme.ink)
+                        Text(APIConfig.baseString.replacingOccurrences(of: "https://", with: "")
+                             + " · " + APIConfig.gate)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Theme.ink3)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.ink3)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if sync.state == .error {
+                Text("同步失败时先点这里：创建家庭报 403、同步一直连不上，几乎都是地址或入口分享码不对。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.expense)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .cardStyle()
+    }
+
     // MARK: 截图
 
     private var captureCard: some View {
@@ -418,6 +466,167 @@ struct MeView: View {
 
     private func refreshPhotoStatus() async {
         photoStatus = await statusText()
+    }
+}
+
+// MARK: - 服务设置
+
+/// 发布域名和入口分享码都可能在下次重新发布时变掉，做成可改的，
+/// 免得为一行配置重新走一遍「改代码 → 云端编译 → 侧载」。
+struct ServiceSheet: View {
+    var onSaved: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var base = APIConfig.baseString
+    @State private var gate = APIConfig.gate
+    @State private var tested: String?
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    field(title: "服务地址",
+                          hint: "发布链接的域名，不带路径",
+                          text: $base,
+                          keyboard: .URL,
+                          mono: true)
+
+                    field(title: "入口分享码",
+                          hint: "发布链接上 ?sharecode= 后面那一串，10 位左右；不是 6 位家庭码",
+                          text: $gate,
+                          keyboard: .asciiCapable,
+                          mono: true)
+
+                    Text("创建家庭账本时 App 还没有家庭码，只能靠这个分享码过网关的校验。填错了会一直报 403。")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.ink3)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let tested {
+                        Text(tested)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(tested.hasPrefix("连接正常") ? Theme.income : Theme.expense)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    HStack(spacing: 10) {
+                        Button {
+                            save()
+                        } label: {
+                            Text("保存")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .background(Theme.brand,
+                                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+
+                        Button {
+                            base = APIConfig.defaultBase
+                            gate = APIConfig.defaultGate
+                            tested = nil
+                        } label: {
+                            Text("恢复默认")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(Theme.ink2)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 12)
+                                .background(Theme.card2,
+                                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Button {
+                        Task { await probe() }
+                    } label: {
+                        Text("先测一下")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Theme.brand)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(18)
+            }
+            .background(Theme.bg)
+            .navigationTitle("服务设置")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func field(title: String, hint: String, text: Binding<String>,
+                       keyboard: UIKeyboardType, mono: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.ink3)
+            TextField("", text: text)
+                .keyboardType(keyboard)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .font(.system(size: mono ? 13 : 14, design: mono ? .monospaced : .default))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 11)
+                .background(Theme.card2, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Theme.line, lineWidth: 0.7))
+            Text(hint)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.ink3)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// 用「加入一个不存在的家庭」探活：既能验证网关放行（不是 403），又不会往服务器写数据。
+    /// 只读输入的临时值，不落盘——测完点取消，原配置不受影响。
+    @MainActor
+    private func probe() async {
+        let b = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        let g = gate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let root = URL(string: b) else {
+            tested = "地址格式不对"
+            return
+        }
+        var comps = URLComponents(url: root.appendingPathComponent("/api/family/join"),
+                                  resolvingAgainstBaseURL: false)!
+        comps.queryItems = [URLQueryItem(name: "sharecode", value: g)]
+        guard let url = comps.url else {
+            tested = "地址格式不对"
+            return
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 12
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["code": "ZZZZZZ"])
+
+        do {
+            let (_, resp) = try await URLSession.shared.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 403 {
+                tested = "网关拒绝（403）：入口分享码不对"
+            } else if code >= 400 {
+                tested = "服务器返回 \(code)"
+            } else {
+                tested = "连接正常，可以保存"
+            }
+        } catch {
+            tested = "连不上：\(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func save() {
+        APIConfig.save(base: base, gate: gate)
+        onSaved()
+        dismiss()
     }
 }
 

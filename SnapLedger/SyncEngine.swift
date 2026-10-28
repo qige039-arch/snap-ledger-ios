@@ -21,9 +21,46 @@ import Combine
 // MARK: - 配置
 
 enum APIConfig {
-    /// 改成自己的服务地址即可。因为要上架/长期自用，建议后面迁到自己的一台轻量云主机，
-    /// 不要长期依赖临时发布出来的域名。
-    static let base = URL(string: "https://snap-ledger-70556.app.workbuddy.host")!
+    /// 服务地址。默认是当前发布出来的临时域名，重新发布会变。因为要上架/长期自用，
+    /// 建议后面迁到自己的一台轻量云主机，不要长期依赖它。
+    static let defaultBase = "https://snap-ledger-70556.app.workbuddy.host"
+
+    /// 发布链接上的 `?sharecode=`。网关要求**每一个**请求都带上它，否则一律 403。
+    /// 注意：它不是 6 位家庭码，两者完全不同（一个是 10 位，一个是 6 位），
+    /// 早先「用家庭码顶替 sharecode」的写法正是创建家庭时报 403 的直接原因。
+    static let defaultGate = "JSXYDYYTKI"
+
+    private static let baseKey = "snap.api.base"
+    private static let gateKey = "snap.api.gate"
+
+    /// 允许在「我的 → 服务设置」里改，改完立刻生效，不用重新编译（免费签名 7 天到期前很关键）
+    static var baseString: String {
+        let v = UserDefaults.standard.string(forKey: baseKey) ?? ""
+        return v.isEmpty ? defaultBase : v
+    }
+
+    static var gate: String {
+        let v = UserDefaults.standard.string(forKey: gateKey) ?? ""
+        return v.isEmpty ? defaultGate : v
+    }
+
+    static var base: URL { URL(string: baseString) ?? URL(string: defaultBase)! }
+
+    static var isCustom: Bool {
+        baseString != defaultBase || gate != defaultGate
+    }
+
+    static func save(base: String, gate: String) {
+        let b = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        let g = gate.trimmingCharacters(in: .whitespacesAndNewlines)
+        UserDefaults.standard.set(b == defaultBase ? "" : b, forKey: baseKey)
+        UserDefaults.standard.set(g == defaultGate ? "" : g, forKey: gateKey)
+    }
+
+    static func reset() {
+        UserDefaults.standard.set("", forKey: baseKey)
+        UserDefaults.standard.set("", forKey: gateKey)
+    }
 }
 
 // MARK: - 报文
@@ -80,12 +117,14 @@ enum SyncError: LocalizedError {
     case server(String)
     case badResponse
     case offline
+    case gate
 
     var errorDescription: String? {
         switch self {
         case .server(let m): return m
         case .badResponse: return "服务器返回异常"
         case .offline: return "没有网络"
+        case .gate: return "服务拒绝了请求（403）：入口分享码不对或已失效。到「我的 → 服务设置」贴上新的分享码。"
         }
     }
 }
@@ -404,10 +443,12 @@ final class SyncEngine: ObservableObject {
     private func post<T: Decodable, B: Encodable>(_ path: String, _ body: B) async throws -> T {
         var comps = URLComponents(url: APIConfig.base.appendingPathComponent(path),
                                   resolvingAgainstBaseURL: false)!
-        // 平台网关要求带 sharecode；它和家庭码是同一个值
-        if let code = store.db.sync?.code, !code.isEmpty {
-            comps.queryItems = [URLQueryItem(name: "sharecode", value: code)]
-        }
+        // 网关要求每个请求都带 sharecode，包括「创建家庭」这种还没有家庭码的请求。
+        // 早先只在已连家庭时才带，于是第一次创建必然 403。
+        var items = comps.queryItems ?? []
+        items.removeAll { $0.name == "sharecode" }
+        items.append(URLQueryItem(name: "sharecode", value: APIConfig.gate))
+        comps.queryItems = items
         guard let url = comps.url else { throw SyncError.badResponse }
 
         var req = URLRequest(url: url)
@@ -419,6 +460,7 @@ final class SyncEngine: ObservableObject {
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw SyncError.badResponse }
 
+        if http.statusCode == 403 { throw SyncError.gate }
         if http.statusCode >= 400 {
             let j = try? JSONDecoder().decode(FamilyResponse.self, from: data)
             throw SyncError.server(j?.message ?? "HTTP \(http.statusCode)")
