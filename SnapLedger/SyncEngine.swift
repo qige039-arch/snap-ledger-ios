@@ -209,8 +209,12 @@ final class SyncEngine: ObservableObject {
 
                 let topAt = payload.compactMap { $0.at }.max() ?? 0
                 store.mutate { d in
+                    // 不能写成 d.sync?.pushedAt = max(d.sync?.pushedAt ?? 0, topAt)：
+                    // 左边是 inout 访问，右边同时读同一个属性，Swift 独占性检查会报
+                    // "overlapping accesses to 'd.sync'"。先取出来再写。
+                    let prevPushed = d.sync?.pushedAt ?? 0
                     d.sync?.lastRev = res.rev ?? 0
-                    d.sync?.pushedAt = max(d.sync?.pushedAt ?? 0, topAt)
+                    d.sync?.pushedAt = max(prevPushed, topAt)
                     d.sync?.lastSyncAt = Date().timeIntervalSince1970 * 1000
                 }
                 store.persist()

@@ -84,7 +84,8 @@ struct AddRecordFromImageIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        guard let data = image.data, let ui = UIImage(data: data) else {
+        // IntentFile.data 是非可选的 Data（不是 Data?），所以不能写 guard let。
+        guard let ui = UIImage(data: image.data) else {
             return .result(dialog: IntentDialog(stringLiteral: "这张图读不出来"))
         }
 

@@ -81,17 +81,17 @@ SnapLedger/
 原理：SwiftUI 只能在 macOS 上编译，所以借 GitHub 的 macOS 机器编译，产出**未签名**的 ipa；
 回到 Windows 用 Sideloadly + 你的免费 Apple ID 签名装进手机。
 
-### ① 建仓库、推上去
+### ① 仓库（已建好）
+
+公开仓库：**https://github.com/qige039-arch/snap-ledger-ios**
+
+本地已 `git init` 并推送到 `main`，以后改完只需：
 
 ```bash
-cd snap-ledger-ios
-git init && git add . && git commit -m "init"
-gh repo create snap-ledger-ios --public --source=. --push
+git add -A && git commit -m "改了什么" && git push
 ```
 
-没有 `gh` 就网页新建仓库，再 `git remote add origin <url> && git push -u origin main`。
-
-> **公开仓库是免费的、不限分钟**（macOS 也是）。代码里没有家庭码、没有服务器密钥——
+> **公开仓库的 macOS 构建免费且不限分钟**。代码里没有家庭码、没有服务器密钥——
 > 家庭码是运行时才填的，公开不泄露任何东西。
 > 实在不想公开也行：私有仓库每月送 2000 分钟，macOS 按 10 倍扣，等于 **200 分钟**；
 > 一次构建约 4 分钟，够跑 40 次。注意私有仓库跑 macOS 需要先绑定付款方式（可以设 $0 上限，不会扣钱）。
