@@ -338,13 +338,15 @@ struct StatView: View {
         }
         .chartYScale(domain: yLow...yHigh)
         .chartXAxis {
-            AxisMarks(values: .automatic(desiredCount: scopeIndex == 2 ? 6 : 5)) { v in
+            // ⚠️ 字符串分类轴不认 desiredCount：不给具体值它会把 30 个日期全画上，
+            // 挤成一条黑线。必须像下面这样显式给刻度。
+            AxisMarks(values: xTicks) { v in
                 AxisGridLine().foregroundStyle(Theme.line.opacity(0.55))
                 AxisValueLabel {
                     if let s = v.as(String.self) {
                         Text(xText(s))
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(Theme.ink3)
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.ink2)
                     }
                 }
             }
@@ -355,8 +357,8 @@ struct StatView: View {
                 AxisValueLabel {
                     if let d = v.as(Double.self) {
                         Text(compact(d))
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(Theme.ink3)
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.ink2)
                     }
                 }
             }
@@ -366,6 +368,24 @@ struct StatView: View {
             plot.background(seriesColor.opacity(0.045))
         }
         .frame(height: 148)
+    }
+
+    /// X 轴刻度：等距挑 6 个
+    ///
+    /// 桶是字符串标签（"1"…"31" / "00"…"23" / "1月"…），Charts 对这类分类轴
+    /// 不做自动抽稀，`desiredCount` 会被忽略，结果 30 个标签全画上去叠成一团。
+    private var xTicks: [String] {
+        let labels = buckets.map { $0.label }
+        guard labels.count > 7 else { return labels }
+        let want = 6
+        let step = max(2, Int((Double(labels.count) / Double(want)).rounded()))
+        var out: [String] = []
+        var i = 0
+        while i < labels.count {
+            out.append(labels[i])
+            i += step
+        }
+        return out
     }
 
     private func xText(_ s: String) -> String {
@@ -439,16 +459,31 @@ struct StatView: View {
         }
     }
 
+    private var singleUnitWord: String {
+        switch scopeIndex {
+        case 0: return "小时"
+        case 1: return "日子"
+        default: return "月份"
+        }
+    }
+
     @ViewBuilder
     private var extremeRow: some View {
         if let pair = extremePair {
-            HStack(spacing: 10) {
-                extremeCell(title: extremeTitle(false),
-                            amount: pair.low.amount,
-                            caption: pair.low.caption)
-                extremeCell(title: extremeTitle(true),
+            if pair.low.caption == pair.high.caption {
+                // 整个范围只有一天有账：两张一模一样的卡没有任何信息量，合成一张
+                extremeCell(title: "唯一有\(seriesName)的" + singleUnitWord,
                             amount: pair.high.amount,
                             caption: pair.high.caption)
+            } else {
+                HStack(spacing: 10) {
+                    extremeCell(title: extremeTitle(false),
+                                amount: pair.low.amount,
+                                caption: pair.low.caption)
+                    extremeCell(title: extremeTitle(true),
+                                amount: pair.high.amount,
+                                caption: pair.high.caption)
+                }
             }
         }
     }
