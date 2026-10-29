@@ -237,6 +237,23 @@ final class LedgerStore: ObservableObject {
         if db.tomb.count > 3000 { db.tomb = Array(db.tomb.suffix(3000)) }
     }
 
+    /// 撤销删除：撤掉墓碑、把记录放回去。
+    /// 必须刷新 at（= 本次修改时间），否则同步时 LWW 会把这条当成旧数据，
+    /// 被另一台手机上的墓碑再删一次。
+    func restore(_ record: LedgerRecord) {
+        db.tomb.removeAll { $0.kind == "r" && $0.id == record.id }
+        guard !db.records.contains(where: { $0.id == record.id }) else {
+            persist()
+            SyncEngine.shared.dirty()
+            return
+        }
+        var r = record
+        r.at = Date().timeIntervalSince1970 * 1000
+        db.records.append(r)
+        persist()
+        SyncEngine.shared.dirty()
+    }
+
     func setMembers(_ list: [FamilyMember]) {
         db.members = list
         persist()

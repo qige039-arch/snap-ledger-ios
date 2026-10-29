@@ -138,12 +138,17 @@ struct MoneyText: View {
 
 // MARK: - 分段控件
 
-/// 自绘分段控件：系统 Picker 的 .segmented 在中文字号下偏挤，且没法做滑动指示条
+/// 自绘分段控件：系统 Picker 的 .segmented 在中文字号下偏挤
+///
+/// 这里踩过两个坑，别再走回去：
+/// 1. `.overlay(Shape)` 会吃掉内部 Button 的点击 —— 整条控件看起来「点了没反应」。
+///    必须给 overlay 加 `.allowsHitTesting(false)`。
+/// 2. `matchedGeometryEffect` 在 LazyVStack / 带隐式动画的 ScrollView 里会让切换帧丢掉，
+///    同样表现为点了不切。改成「每段自己带背景」，靠 `.animation(value:)` 过渡，稳。
 struct ScopeSegmented: View {
     let titles: [String]
     @Binding var index: Int
 
-    @Namespace private var ns
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
@@ -151,7 +156,7 @@ struct ScopeSegmented: View {
             ForEach(titles.indices, id: \.self) { i in
                 Button {
                     guard i != index else { return }
-                    withAnimation(.easeOut(duration: 0.2)) { index = i }
+                    index = i
                 } label: {
                     Text(titles[i])
                         .font(.system(size: 14, weight: i == index ? .semibold : .regular))
@@ -159,24 +164,27 @@ struct ScopeSegmented: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 7)
                         .background {
-                            if i == index {
-                                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                    .fill(Theme.card)
-                                    .shadow(color: .black.opacity(scheme == .dark ? 0.4 : 0.08),
-                                            radius: 3, x: 0, y: 1)
-                                    .matchedGeometryEffect(id: "seg", in: ns)
-                            }
+                            // 背景恒存在（未选中是透明），三段的命中区域才一样大
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .fill(i == index ? Theme.card : Color.clear)
+                                .shadow(color: .black.opacity(i == index ? (scheme == .dark ? 0.4 : 0.08) : 0),
+                                        radius: i == index ? 3 : 0,
+                                        x: 0,
+                                        y: i == index ? 1 : 0)
                         }
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
         }
         .padding(3)
         .background(Theme.card2, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
+        .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(Theme.line, lineWidth: 0.7)
-        )
+                .allowsHitTesting(false)
+        }
+        .animation(.easeOut(duration: 0.16), value: index)
     }
 }
 

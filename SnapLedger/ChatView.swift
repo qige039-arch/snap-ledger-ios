@@ -12,6 +12,8 @@
 //
 
 import SwiftUI
+import UIKit
+import PhotosUI
 
 enum ChatItem: Identifiable {
     case text(id: String, mine: Bool, body: String)
@@ -39,6 +41,8 @@ struct ChatView: View {
     @State private var input: String = ""
     @State private var toast: String?
     @State private var showAllRecords = false
+    @State private var showPhotoPicker = false
+    @State private var pickerItem: PhotosPickerItem?
     @FocusState private var inputFocused: Bool
 
     private var monthTotals: (income: Double, expense: Double) {
@@ -105,6 +109,12 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showAllRecords) {
             AllRecordsSheet()
+        }
+        .photosPicker(isPresented: $showPhotoPicker, selection: $pickerItem, matching: .images)
+        .onChange(of: pickerItem) { _, item in
+            guard let item else { return }
+            pickerItem = nil
+            Task { await readPickedPhoto(item) }
         }
     }
 
@@ -320,17 +330,27 @@ struct ChatView: View {
             Rectangle().fill(Theme.line).frame(height: 0.7)
 
             HStack(alignment: .bottom, spacing: 9) {
-                Button {
-                    inputFocused = false
-                    Task { await watcher.pickUpNow() }
+                // 以前这里直接调「读最新截图」：相册权限没给、或最新截图超出时间窗，
+                // 点了就是一潭死水。改成菜单，两条路都摆在明面上。
+                Menu {
+                    Button {
+                        Task { await watcher.pickUpNow() }
+                    } label: {
+                        Label("读取最新截图", systemImage: "photo.badge.arrow.down")
+                    }
+                    Button {
+                        showPhotoPicker = true
+                    } label: {
+                        Label("从相册选一张", systemImage: "photo.on.rectangle")
+                    }
                 } label: {
                     Image(systemName: "photo.on.rectangle.angled")
                         .font(.system(size: 17, weight: .medium))
                         .foregroundStyle(Theme.brand)
                         .frame(width: 36, height: 36)
                         .background(Theme.brandSoft, in: Circle())
+                        .contentShape(Circle())
                 }
-                .buttonStyle(.plain)
 
                 TextField("说一句：午饭 32", text: $input, axis: .vertical)
                     .lineLimit(1...4)
@@ -393,6 +413,30 @@ struct ChatView: View {
         }
 
         Task { await watcher.pickUpOnLaunch() }
+    }
+
+    /// 从相册手选一张图识别。选完立刻给反馈，绝不静默失败。
+    private func readPickedPhoto(_ item: PhotosPickerItem) async {
+        watcher.status = "正在识别选中的图片…"
+        guard let data = try? await item.loadTransferable(type: Data.self),
+              let img = UIImage(data: data) else {
+            watcher.status = ""
+            items.append(.text(id: UUID().uuidString, mine: false,
+                               body: "这张图读不出来（可能格式不支持），换一张试试。"))
+            return
+        }
+        let text = await withCheckedContinuation { (c: CheckedContinuation<String, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                c.resume(returning: TextOCR.recognize(img))
+            }
+        }
+        watcher.status = ""
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            items.append(.text(id: UUID().uuidString, mine: false,
+                               body: "这张图里没读到文字。要是账单截图太小，放大一点再截一次。"))
+            return
+        }
+        handleOCR(text)
     }
 
     private func send() {
@@ -559,6 +603,8 @@ struct AllRecordsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var store = LedgerStore.shared
     @State private var editing: LedgerRecord?
+    @State private var undoRecord: LedgerRecord?
+    @State private var undoTimer: Task<Void, Never>?
 
     var body: some View {
         NavigationStack {
@@ -585,9 +631,12 @@ struct AllRecordsSheet: View {
 
                             VStack(spacing: 0) {
                                 ForEach(g.records) { r in
-                                    RecordLine(record: r, memberName: store.memberName(r.member)) {
-                                        editing = r
-                                    }
+                                    // 注意：这里必须写 onTap:，不能像以前那样用尾随闭包——
+                                    // RecordLine 现在最后一个参数是 onDelete，尾随闭包会绑到删除上
+                                    RecordLine(record: r,
+                                               memberName: store.memberName(r.member),
+                                               onTap: { editing = r },
+                                               onDelete: { remove(r) })
                                     if r.id != g.records.last?.id {
                                         Rectangle().fill(Theme.line).frame(height: 0.7).padding(.leading, 64)
                                     }
@@ -612,6 +661,34 @@ struct AllRecordsSheet: View {
             .background(Theme.bg)
             .navigationTitle("全部记录")
             .navigationBarTitleDisplayMode(.inline)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if let r = undoRecord {
+                    HStack(spacing: 10) {
+                        Text("已删除 \(r.category) \(Money.currency(r.amount))")
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(Theme.ink2)
+                            .lineLimit(1)
+                        Spacer(minLength: 6)
+                        Button {
+                            store.restore(r)
+                            undoTimer?.cancel()
+                            withAnimation(.easeOut(duration: 0.2)) { undoRecord = nil }
+                        } label: {
+                            Text("撤销")
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundStyle(Theme.brand)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 11)
+                    .background(.ultraThinMaterial)
+                    .overlay(alignment: .top) {
+                        Rectangle().fill(Theme.line).frame(height: 0.7)
+                    }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") { dismiss() }
@@ -621,6 +698,19 @@ struct AllRecordsSheet: View {
                 RecordEditor(record: rec)
                     .presentationDetents([.medium, .large])
                     .presentationDragIndicator(.visible)
+            }
+        }
+    }
+
+    private func remove(_ r: LedgerRecord) {
+        store.delete(id: r.id)
+        withAnimation(.easeOut(duration: 0.2)) { undoRecord = r }
+        undoTimer?.cancel()
+        undoTimer = Task {
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.easeOut(duration: 0.2)) { undoRecord = nil }
             }
         }
     }

@@ -18,6 +18,8 @@ struct BookView: View {
     @State private var addDate: Date?          // 从空格子补账时带上的日期
     @State private var heatPick: String?       // 日历上选中的那格
     @State private var missingDay: Date?       // 点了却没有任何记录的那天
+    @State private var undoRecord: LedgerRecord?   // 刚删掉的，给 4 秒反悔期
+    @State private var undoTimer: Task<Void, Never>?
 
     private let scopeTitles = ["日", "月", "年"]
 
@@ -63,6 +65,11 @@ struct BookView: View {
         VStack(spacing: 0) {
             header
 
+            if undoRecord != nil {
+                undoBar
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 14) {
@@ -88,8 +95,9 @@ struct BookView: View {
                     .padding(.top, 4)
                     .padding(.bottom, 28)
                 }
+                // 只给翻页加隐式动画。scopeIndex 的动画交给 ScopeSegmented 自己做，
+                // 两处同时上动画会和 LazyVStack 的项目增删打架，切换看起来像「没反应」。
                 .animation(.easeOut(duration: 0.22), value: anchor)
-                .animation(.easeOut(duration: 0.22), value: scopeIndex)
             }
         }
         .background(Theme.bg)
@@ -111,6 +119,60 @@ struct BookView: View {
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
+    }
+
+    // MARK: 删除 / 撤销
+
+    /// 删完不弹窗、不打断，只在顶部留 4 秒反悔期
+    private var undoBar: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "trash")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.expense)
+            Text("已删除这笔账")
+                .font(.system(size: 12.5))
+                .foregroundStyle(Theme.ink2)
+            Spacer(minLength: 6)
+            Button {
+                undoDelete()
+            } label: {
+                Text("撤销")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(Theme.brand)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(Theme.card)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Theme.line).frame(height: 0.7)
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+    }
+
+    private func remove(_ r: LedgerRecord) {
+        store.delete(id: r.id)
+        withAnimation(.easeOut(duration: 0.2)) { undoRecord = r }
+        undoTimer?.cancel()
+        undoTimer = Task {
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.easeOut(duration: 0.2)) { undoRecord = nil }
+            }
+        }
+    }
+
+    private func undoDelete() {
+        guard let r = undoRecord else { return }
+        store.restore(r)
+        undoTimer?.cancel()
+        withAnimation(.easeOut(duration: 0.2)) { undoRecord = nil }
     }
 
     // MARK: 点日历某一格
@@ -266,6 +328,19 @@ struct BookView: View {
         let buckets = store.yearMonthBuckets(year: year)
         let maxV = max(buckets.map { $0.expense }.max() ?? 0, 1)
         return VStack(spacing: 0) {
+            HStack {
+                Text("12 个月支出")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(Theme.ink2)
+                Spacer()
+                Text("点一个月看明细")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.ink3)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 6)
+
             ForEach(buckets) { b in
                 let monthIndex = Int(b.key.split(separator: "-").last.map(String.init) ?? "0") ?? 0
                 Button {
@@ -342,9 +417,10 @@ struct BookView: View {
 
             VStack(spacing: 0) {
                 ForEach(g.records) { r in
-                    RecordLine(record: r, memberName: store.memberName(r.member)) {
-                        editing = r
-                    }
+                    RecordLine(record: r,
+                               memberName: store.memberName(r.member),
+                               onTap: { editing = r },
+                               onDelete: { remove(r) })
                     if r.id != g.records.last?.id {
                         Rectangle().fill(Theme.line).frame(height: 0.7).padding(.leading, 64)
                     }
@@ -393,9 +469,60 @@ struct RecordLine: View {
     let record: LedgerRecord
     let memberName: String
     var onTap: (() -> Void)?
+    var onDelete: (() -> Void)?
+
+    @State private var dx: CGFloat = 0
+    private let actionWidth: CGFloat = 76
 
     var body: some View {
+        ZStack(alignment: .trailing) {
+            // 左滑露出来的删除按钮，垫在行下面
+            if let del = onDelete {
+                Button {
+                    closeRow()
+                    del()
+                } label: {
+                    VStack(spacing: 3) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 15, weight: .semibold))
+                        Text("删除")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundStyle(.white)
+                    .frame(width: actionWidth)
+                    .frame(maxHeight: .infinity)
+                    .background(Theme.expense)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            rowBody
+        }
+        .clipped()
+    }
+
+    /// 只有可删的行才挂手势和长按菜单（聊天里的只读记录不挂，免得出现空菜单）
+    @ViewBuilder
+    private var rowBody: some View {
+        if let del = onDelete {
+            rowButton
+                .background(Theme.card)
+                .offset(x: dx)
+                .simultaneousGesture(swipe)
+                .contextMenu {
+                    Button(role: .destructive) { del() } label: {
+                        Label("删除这笔", systemImage: "trash")
+                    }
+                }
+        } else {
+            rowButton
+        }
+    }
+
+    private var rowButton: some View {
         Button {
+            closeRow()
             onTap?()
         } label: {
             HStack(spacing: 12) {
@@ -435,6 +562,27 @@ struct RecordLine: View {
         }
         .buttonStyle(.plain)
     }
+
+    /// 只接管水平方向，竖直方向留给 ScrollView，否则列表就划不动了
+    private var swipe: some Gesture {
+        DragGesture(minimumDistance: 16)
+            .onChanged { g in
+                guard onDelete != nil else { return }
+                guard abs(g.translation.width) > abs(g.translation.height) * 1.3 else { return }
+                dx = min(0, max(-actionWidth, g.translation.width))
+            }
+            .onEnded { g in
+                guard onDelete != nil else { return }
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
+                    dx = (g.translation.width < -actionWidth * 0.4) ? -actionWidth : 0
+                }
+            }
+    }
+
+    private func closeRow() {
+        guard dx != 0 else { return }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { dx = 0 }
+    }
 }
 
 // MARK: - 编辑 / 新增
@@ -450,6 +598,7 @@ struct RecordEditor: View {
     @State private var isIncome: Bool = false
     @State private var category: String = "其他"
     @State private var emoji: String = "📦"
+    @State private var showDeleteConfirm = false
 
     private let cols = [GridItem(.adaptive(minimum: 74), spacing: 8)]
 
@@ -492,6 +641,28 @@ struct RecordEditor: View {
                         set: { isIncome = ($0 == 1) }
                     ))
 
+                    // 删除放在这——之前贴在页面最底部，半屏高度时根本看不到，
+                    // 用户会以为「没有删除功能」
+                    if record != nil {
+                        Button {
+                            showDeleteConfirm = true
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 12, weight: .semibold))
+                                Text("删除这笔")
+                                    .font(.system(size: 13.5, weight: .medium))
+                            }
+                            .foregroundStyle(Theme.expense)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Theme.expense.opacity(0.09),
+                                        in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+
                     Text("分类")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(Theme.ink2)
@@ -522,26 +693,6 @@ struct RecordEditor: View {
                             .buttonStyle(.plain)
                         }
                     }
-
-                    if record != nil {
-                        Button(role: .destructive) {
-                            if let r = record { store.delete(id: r.id) }
-                            dismiss()
-                        } label: {
-                            HStack {
-                                Spacer()
-                                Label("删除这笔", systemImage: "trash")
-                                    .font(.system(size: 14, weight: .medium))
-                                Spacer()
-                            }
-                            .padding(.vertical, 12)
-                            .background(Theme.expense.opacity(0.1),
-                                        in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(Theme.expense)
-                        .padding(.top, 6)
-                    }
                 }
                 .padding(16)
             }
@@ -559,6 +710,15 @@ struct RecordEditor: View {
                 }
             }
             .onAppear(perform: load)
+            .confirmationDialog("删除这笔账？", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
+                Button("删除", role: .destructive) {
+                    if let r = record { store.delete(id: r.id) }
+                    dismiss()
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("删除后另一台手机上的这一笔也会一起消失。")
+            }
         }
     }
 
