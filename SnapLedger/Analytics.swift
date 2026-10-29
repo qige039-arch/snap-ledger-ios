@@ -5,6 +5,9 @@
 //  没写进 Models.swift：那里是数据与持久化，这里是视图需要的一次性聚合，
 //  分开放以后改展示逻辑不用碰存储。
 //
+//  ⚠️ 所有聚合都必须过 `inCurrentBook`。多账本以后，漏掉一处就会出现
+//     「切到旅行账本，统计里还混着家里的开销」这种最难查的 bug。
+//
 
 import Foundation
 
@@ -53,21 +56,24 @@ extension LedgerStore {
     func records(from: Date, to: Date) -> [LedgerRecord] {
         let lo = from.timeIntervalSince1970 * 1000
         let hi = to.timeIntervalSince1970 * 1000
-        return db.records.filter { $0.ts >= lo && $0.ts < hi }.sorted { $0.ts > $1.ts }
+        return db.records.filter { $0.ts >= lo && $0.ts < hi && inCurrentBook($0) }
+            .sorted { $0.ts > $1.ts }
     }
 
     func count(from: Date, to: Date) -> Int {
         let lo = from.timeIntervalSince1970 * 1000
         let hi = to.timeIntervalSince1970 * 1000
-        return db.records.filter { $0.ts >= lo && $0.ts < hi }.count
+        return db.records.filter { $0.ts >= lo && $0.ts < hi && inCurrentBook($0) }.count
     }
 
     /// 分类合计，金额降序
     func categoryTotals(from: Date, to: Date, income: Bool) -> [CatTotal] {
+        let lo = from.timeIntervalSince1970 * 1000
+        let hi = to.timeIntervalSince1970 * 1000
         var map: [String: (emoji: String, amount: Double, count: Int)] = [:]
         for r in db.records where r.isIncome == income {
             let ms = r.ts
-            guard ms >= from.timeIntervalSince1970 * 1000, ms < to.timeIntervalSince1970 * 1000 else { continue }
+            guard ms >= lo, ms < hi, inCurrentBook(r) else { continue }
             let cur = map[r.category] ?? (r.emoji, 0, 0)
             map[r.category] = (cur.emoji, cur.amount + r.amount, cur.count + 1)
         }
@@ -88,9 +94,7 @@ extension LedgerStore {
             map[day, default: []].append(r)
         }
         return order.map { day in
-            let f = DateFormatter()
-            f.dateFormat = "yyyy-MM-dd"
-            return DayGroup(key: f.string(from: day), day: day, records: map[day] ?? [])
+            DayGroup(key: Fmt.key(day), day: day, records: map[day] ?? [])
         }
     }
 
@@ -98,9 +102,11 @@ extension LedgerStore {
     func dayBuckets(from: Date, to: Date) -> [Bucket] {
         let cal = Fmt.cal
         var map: [Date: (Double, Double)] = [:]
+        let lo = from.timeIntervalSince1970 * 1000
+        let hi = to.timeIntervalSince1970 * 1000
         for r in db.records {
             let ms = r.ts
-            guard ms >= from.timeIntervalSince1970 * 1000, ms < to.timeIntervalSince1970 * 1000 else { continue }
+            guard ms >= lo, ms < hi, inCurrentBook(r) else { continue }
             let day = cal.startOfDay(for: Date(timeIntervalSince1970: ms / 1000))
             var cur = map[day] ?? (0, 0)
             if r.isIncome { cur.0 += r.amount } else { cur.1 += r.amount }
@@ -108,14 +114,10 @@ extension LedgerStore {
         }
         var out: [Bucket] = []
         var cur = cal.startOfDay(for: from)
-        let df = DateFormatter()
-        df.dateFormat = "d"
-        let kf = DateFormatter()
-        kf.dateFormat = "yyyy-MM-dd"
         while cur < to {
             let v = map[cur] ?? (0, 0)
-            out.append(Bucket(key: kf.string(from: cur),
-                              label: df.string(from: cur),
+            out.append(Bucket(key: Fmt.key(cur),
+                              label: Fmt.dayNumber(cur),
                               income: v.0,
                               expense: v.1))
             guard let next = cal.date(byAdding: .day, value: 1, to: cur) else { break }
@@ -124,10 +126,30 @@ extension LedgerStore {
         return out
     }
 
+    /// 一天 24 个小时的桶（日视图的「分时走势」）
+    func hourBuckets(on day: Date) -> [Bucket] {
+        let cal = Fmt.cal
+        let start = cal.startOfDay(for: day)
+        guard let end = cal.date(byAdding: .day, value: 1, to: start) else { return [] }
+        let lo = start.timeIntervalSince1970 * 1000
+        let hi = end.timeIntervalSince1970 * 1000
+        var arr = Array(repeating: (0.0, 0.0), count: 24)
+        for r in db.records {
+            let ms = r.ts
+            guard ms >= lo, ms < hi, inCurrentBook(r) else { continue }
+            let h = cal.component(.hour, from: Date(timeIntervalSince1970: ms / 1000))
+            guard h >= 0, h < 24 else { continue }
+            if r.isIncome { arr[h].0 += r.amount } else { arr[h].1 += r.amount }
+        }
+        return (0..<24).map { i in
+            Bucket(key: "h\(i)", label: String(format: "%02d", i),
+                   income: arr[i].0, expense: arr[i].1)
+        }
+    }
+
     /// 某一年的 12 个月桶
     func yearMonthBuckets(year: Int) -> [Bucket] {
-        let rows = monthlyTotals(in: year)
-        return rows.map {
+        monthlyTotals(in: year).map {
             Bucket(key: "\(year)-\($0.month)", label: "\($0.month)月",
                    income: $0.income, expense: $0.expense)
         }
@@ -150,7 +172,7 @@ extension LedgerStore {
         var map: [Int: (exp: Double, inc: Double, n: Int)] = [:]
         for r in db.records {
             let d = Date(timeIntervalSince1970: r.ts / 1000)
-            guard d >= monthStart, d < nextMonth else { continue }
+            guard d >= monthStart, d < nextMonth, inCurrentBook(r) else { continue }
             let day = cal.component(.day, from: d)
             var cur = map[day] ?? (0, 0, 0)
             if r.isIncome { cur.inc += r.amount } else { cur.exp += r.amount }
@@ -166,9 +188,6 @@ extension LedgerStore {
         let cells = rows * 7
         guard let gridStart = cal.date(byAdding: .day, value: -lead, to: monthStart) else { return [] }
 
-        let df = DateFormatter()
-        df.dateFormat = "yyyy-MM-dd"
-
         var out: [HeatDay] = []
         out.reserveCapacity(cells)
         let blank: (exp: Double, inc: Double, n: Int) = (0, 0, 0)
@@ -177,7 +196,7 @@ extension LedgerStore {
             let num = cal.component(.day, from: d)
             let inMonth = d >= monthStart && d < nextMonth
             let v = inMonth ? (map[num] ?? blank) : blank
-            out.append(HeatDay(key: df.string(from: d),
+            out.append(HeatDay(key: Fmt.key(d),
                                day: d,
                                dayNumber: num,
                                expense: v.exp,

@@ -66,26 +66,27 @@ enum APIConfig {
 // MARK: - 报文
 
 struct SyncEntity: Codable {
-    var kind: String          // "r" 记录 / "m" 成员
-    var id: String
-    var at: Double?
-    var ts: Double?
-    var type: String?
-    var amount: Double?
-    var category: String?
-    var emoji: String?
-    var merchant: String?
-    var method: String?
-    var note: String?
-    var member: String?
-    var source: String?
-    var name: String?
-    var deleted: Int?
-    var r: Int?
+    var kind: String = ""     // "r" 记录 / "m" 成员 / "b" 账本
+    var id: String = ""
+    var at: Double? = nil
+    var ts: Double? = nil
+    var type: String? = nil
+    var amount: Double? = nil
+    var category: String? = nil
+    var emoji: String? = nil
+    var merchant: String? = nil
+    var method: String? = nil
+    var note: String? = nil
+    var member: String? = nil
+    var source: String? = nil
+    var book: String? = nil       // 记录所属账本
+    var name: String? = nil       // 成员 / 账本名
+    var deleted: Int? = nil
+    var r: Int? = nil
 
     enum CodingKeys: String, CodingKey {
         case kind, id, at, ts, type, amount, category, emoji, merchant
-        case method, note, member, source, name, deleted
+        case method, note, member, source, book, name, deleted
         case r = "_r"
     }
 }
@@ -295,30 +296,65 @@ final class SyncEngine: ObservableObject {
         var out: [SyncEntity] = []
 
         for r in db.records where watermark == 0 || r.at >= line {
-            out.append(SyncEntity(kind: "r", id: r.id, at: r.at, ts: r.ts,
-                                  type: r.type, amount: r.amount, category: r.category,
-                                  emoji: r.emoji, merchant: r.merchant, method: r.method,
-                                  note: r.note, member: r.member, source: r.source,
-                                  name: nil, deleted: nil, r: nil))
+            var e = SyncEntity()
+            e.kind = "r"
+            e.id = r.id
+            e.at = r.at
+            e.ts = r.ts
+            e.type = r.type
+            e.amount = r.amount
+            e.category = r.category
+            e.emoji = r.emoji
+            e.merchant = r.merchant
+            e.method = r.method
+            e.note = r.note
+            e.member = r.member
+            e.source = r.source
+            e.book = r.book
+            out.append(e)
         }
+
+        // 账本本身也要同步，否则另一台手机上只有「家庭账本」，记录会被挂到默认账本里
+        for b in db.books {
+            var e = SyncEntity()
+            e.kind = "b"
+            e.id = b.id
+            e.at = b.at
+            e.ts = b.createdAt
+            e.name = b.name
+            e.emoji = b.emoji
+            out.append(e)
+        }
+
         for m in db.members {
-            out.append(SyncEntity(kind: "m", id: m.id, at: m.at, ts: nil,
-                                  type: nil, amount: nil, category: nil, emoji: m.emoji,
-                                  merchant: nil, method: nil, note: nil, member: nil,
-                                  source: nil, name: m.name, deleted: nil, r: nil))
+            var e = SyncEntity()
+            e.kind = "m"
+            e.id = m.id
+            e.at = m.at
+            e.name = m.name
+            e.emoji = m.emoji
+            out.append(e)
         }
+
         for t in db.tomb.suffix(800) {
-            if t.kind == "m" {
-                out.append(SyncEntity(kind: "m", id: t.id, at: t.at, ts: nil,
-                                      type: nil, amount: nil, category: nil, emoji: "",
-                                      merchant: nil, method: nil, note: nil, member: nil,
-                                      source: nil, name: "", deleted: 1, r: nil))
-            } else {
-                out.append(SyncEntity(kind: "r", id: t.id, at: t.at, ts: t.at,
-                                      type: "expense", amount: 0, category: "", emoji: "",
-                                      merchant: "", method: "", note: "", member: "",
-                                      source: "", name: nil, deleted: 1, r: nil))
+            var e = SyncEntity()
+            e.kind = t.kind
+            e.id = t.id
+            e.at = t.at
+            e.deleted = 1
+            if t.kind == "r" {
+                e.ts = t.at
+                e.type = "expense"
+                e.amount = 0
+                e.category = ""
+                e.emoji = ""
+                e.merchant = ""
+                e.method = ""
+                e.note = ""
+                e.member = ""
+                e.source = ""
             }
+            out.append(e)
         }
         return out
     }
@@ -332,6 +368,30 @@ final class SyncEngine: ObservableObject {
         var fresh: [LedgerRecord] = []
         store.mutate { db in
             for e in list {
+                // 账本
+                if e.kind == "b" {
+                    if e.deleted == 1 {
+                        db.books.removeAll { $0.id == e.id }
+                        if !db.tomb.contains(where: { $0.kind == "b" && $0.id == e.id }) {
+                            db.tomb.append(Tombstone(kind: "b", id: e.id,
+                                                     at: e.at ?? Date().timeIntervalSince1970 * 1000))
+                        }
+                    } else if let i = db.books.firstIndex(where: { $0.id == e.id }) {
+                        if (e.at ?? 0) > db.books[i].at {
+                            db.books[i].name = e.name ?? db.books[i].name
+                            db.books[i].emoji = e.emoji ?? db.books[i].emoji
+                            db.books[i].at = e.at ?? db.books[i].at
+                        }
+                    } else {
+                        db.books.append(LedgerBook(id: e.id,
+                                                   name: e.name ?? "账本",
+                                                   emoji: e.emoji ?? "📒",
+                                                   at: e.at ?? 1,
+                                                   createdAt: e.ts ?? (e.at ?? 1)))
+                    }
+                    continue
+                }
+
                 if e.kind == "m" {
                     if e.deleted == 1 {
                         db.members.removeAll { $0.id == e.id }
@@ -370,7 +430,8 @@ final class SyncEngine: ObservableObject {
                                        method: e.method ?? "",
                                        note: e.note ?? "",
                                        member: e.member ?? "",
-                                       source: e.source ?? "sync")
+                                       source: e.source ?? "sync",
+                                       book: e.book ?? "")
 
                 if let i = db.records.firstIndex(where: { $0.id == e.id }) {
                     if rec.at > db.records[i].at {
@@ -380,6 +441,15 @@ final class SyncEngine: ObservableObject {
                     db.records.append(rec)
                     fresh.append(rec)
                 }
+            }
+
+            // 对方把账本删光了（或者服务端数据重建）：兜一个默认账本，
+            // 否则界面没有落点、记账会写进空账本 id。
+            if db.books.isEmpty {
+                db.books = [LedgerBook(id: LedgerBook.defaultId, name: "家庭账本", emoji: "🏠")]
+            }
+            if !db.books.contains(where: { $0.id == db.currentBook }) {
+                db.currentBook = db.books.first?.id ?? LedgerBook.defaultId
             }
         }
         return fresh
@@ -408,14 +478,23 @@ final class SyncEngine: ObservableObject {
 
     private func start(_ code: String) async {
         let prev = store.db.sync?.selfMemberId ?? ""
+        // ⚠️ mutate 里是 &db 的独占访问，闭包内不能再调 self 上会读 store.db 的方法
+        //    （比如 deviceId()），否则触发 "Simultaneous accesses" 崩溃。先在外面取好。
+        let dev = deviceId()
         store.mutate { d in
             var cfg = SyncConfig()
             cfg.code = code
-            cfg.deviceId = self.deviceId()
+            cfg.deviceId = dev
             cfg.selfMemberId = prev.isEmpty ? (d.members.first?.id ?? "") : prev
             d.sync = cfg
             if d.members.isEmpty {
                 d.members = [FamilyMember(name: "我", emoji: "🙂")]
+            }
+            if d.books.isEmpty {
+                d.books = [LedgerBook(id: LedgerBook.defaultId, name: "家庭账本", emoji: "🏠")]
+            }
+            if d.currentBook.isEmpty || !d.books.contains(where: { $0.id == d.currentBook }) {
+                d.currentBook = d.books.first?.id ?? LedgerBook.defaultId
             }
         }
         store.persist()

@@ -49,8 +49,8 @@ targets:
       path: Info.plist
       properties:
         CFBundleDisplayName: 家庭记账
-        CFBundleShortVersionString: "0.1"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "0.2"
+        CFBundleVersion: "2"
         # 少了 UILaunchScreen，iOS 会用兼容模式跑，界面变小、有黑边
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
@@ -64,8 +64,8 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.familysnap.snapledger
         PRODUCT_NAME: SnapLedger
         TARGETED_DEVICE_FAMILY: "1"
-        MARKETING_VERSION: "0.1"
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "0.2"
+        CURRENT_PROJECT_VERSION: "2"
         # 不加这一行，Assets 里的图标不会被编译进 App，装到手机上是白图标
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
 

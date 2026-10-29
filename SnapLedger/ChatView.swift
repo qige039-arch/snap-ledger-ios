@@ -18,7 +18,9 @@ import PhotosUI
 enum ChatItem: Identifiable {
     case text(id: String, mine: Bool, body: String)
     case card(id: String, bill: ParsedBill, savedId: String?)
-    case record(id: String, record: LedgerRecord)
+    /// 只存 id，渲染时再去 store 里取。这样在别处删掉/改掉一笔，聊天里立刻跟着变，
+    /// 不会留下一张「点了还在、其实已经删了」的僵尸卡片。
+    case record(id: String, recordId: String)
     case tip(id: String, body: String)
 
     var id: String {
@@ -43,6 +45,9 @@ struct ChatView: View {
     @State private var showAllRecords = false
     @State private var showPhotoPicker = false
     @State private var pickerItem: PhotosPickerItem?
+    @State private var editing: LedgerRecord?
+    @State private var undoRecord: LedgerRecord?
+    @State private var undoTimer: Task<Void, Never>?
     @FocusState private var inputFocused: Bool
 
     private var monthTotals: (income: Double, expense: Double) {
@@ -89,7 +94,17 @@ struct ChatView: View {
             .scrollDismissesKeyboard(.interactively)
         }
         .background(Theme.bg)
-        .safeAreaInset(edge: .bottom, spacing: 0) { inputBar }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                if let r = undoRecord {
+                    UndoBar(text: "已删除 \(r.category) \(Money.currency(r.amount))") {
+                        undoDelete()
+                    }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+                inputBar
+            }
+        }
         .onAppear(perform: bootstrap)
         .onChange(of: watcher.incoming) { _, text in
             guard let t = text else { return }
@@ -115,6 +130,11 @@ struct ChatView: View {
             guard let item else { return }
             pickerItem = nil
             Task { await readPickedPhoto(item) }
+        }
+        .sheet(item: $editing) { rec in
+            RecordEditor(record: rec)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
         }
     }
 
@@ -294,11 +314,17 @@ struct ChatView: View {
                        onDiscard: { discard(id: id) })
                 .padding(.horizontal, 16)
 
-        case .record(_, let record):
-            RecordLine(record: record, memberName: store.memberName(record.member))
-                .padding(.horizontal, 12)
-                .cardStyle(padding: 0, radius: 14)
-                .padding(.horizontal, 16)
+        case .record(_, let rid):
+            // 记录已经不存在（在账本页删掉了）就什么都不画，别留空壳
+            if let r = store.db.records.first(where: { $0.id == rid }) {
+                RecordLine(record: r,
+                           memberName: store.memberName(r.member),
+                           onTap: { editing = r },
+                           onDelete: { remove(r) })
+                    .padding(.horizontal, 12)
+                    .cardStyle(padding: 0, radius: 14)
+                    .padding(.horizontal, 16)
+            }
         }
     }
 
@@ -401,9 +427,15 @@ struct ChatView: View {
         sync.bootstrap()
 
         if items.isEmpty {
-            let recent = store.sortedRecords.prefix(6).reversed()
-            for r in recent {
-                items.append(.record(id: "h\(r.id)", record: r))
+            // 重新打开时把最近的账目铺回来：能看到、能点开改、也能直接删。
+            // 之前只给 6 条而且只读，用户会以为「记完就删不掉了」。
+            let recent = Array(store.sortedRecords.prefix(30).reversed())
+            if !recent.isEmpty {
+                items.append(.text(id: "recent", mine: false,
+                                   body: "最近 \(recent.count) 笔（\(store.currentBook?.name ?? "家庭账本")）。左滑一条可以删除，点一下能改。"))
+                for r in recent {
+                    items.append(.record(id: "h\(r.id)", recordId: r.id))
+                }
             }
             items.append(.text(id: "welcome", mine: false,
                                body: "说一句话就能记，比如「午饭 32」「老婆买菜 86」。"))
@@ -469,7 +501,11 @@ struct ChatView: View {
         if rec.member.isEmpty { rec.member = store.selfMemberId }
         let saved = store.add(rec)
         if let i = items.firstIndex(where: { $0.id == id }) {
-            items[i] = .card(id: id, bill: bill, savedId: saved.id)
+            // 待确认卡片直接变成「已记账」的记录行：同一条数据，能左滑删、能点开改。
+            // 不再额外插一条，否则同一笔在聊天里出现两次。
+            items[i] = .record(id: id, recordId: saved.id)
+        } else {
+            items.append(.record(id: "n\(saved.id)", recordId: saved.id))
         }
         withAnimation { toast = "已记账 · \(saved.category) \(Money.currency(saved.amount))" }
         Task {
@@ -480,6 +516,28 @@ struct ChatView: View {
 
     private func discard(id: String) {
         withAnimation { items.removeAll { $0.id == id } }
+    }
+
+    // MARK: 删除 / 撤销
+
+    private func remove(_ r: LedgerRecord) {
+        store.delete(id: r.id)
+        withAnimation(.easeOut(duration: 0.2)) { undoRecord = r }
+        undoTimer?.cancel()
+        undoTimer = Task {
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.easeOut(duration: 0.2)) { undoRecord = nil }
+            }
+        }
+    }
+
+    private func undoDelete() {
+        guard let r = undoRecord else { return }
+        store.restore(r)
+        undoTimer?.cancel()
+        withAnimation(.easeOut(duration: 0.2)) { undoRecord = nil }
     }
 }
 
@@ -696,7 +754,7 @@ struct AllRecordsSheet: View {
             }
             .sheet(item: $editing) { rec in
                 RecordEditor(record: rec)
-                    .presentationDetents([.medium, .large])
+                    .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
             }
         }

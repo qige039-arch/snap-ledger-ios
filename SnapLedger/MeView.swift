@@ -20,6 +20,7 @@ struct MeView: View {
     @State private var photoStatus = "读取中…"
     @State private var showAbout = false
     @State private var showService = false
+    @State private var showSelf = false
     @State private var showCodeCopied = false
 
     private var code: String { store.db.sync?.code ?? "" }
@@ -58,6 +59,7 @@ struct MeView: View {
             Text(err ?? "")
         }
         .sheet(isPresented: $showAbout) { AboutSheet() }
+        .sheet(isPresented: $showSelf) { MemberSheet(member: store.selfMember) }
         .sheet(isPresented: $showService) {
             ServiceSheet {
                 // 改完地址/分享码，已连家庭的话立刻重连一次，不用等 45 秒轮询
@@ -79,17 +81,24 @@ struct MeView: View {
                                 in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(me?.name ?? "我")
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundStyle(.white)
+                    HStack(spacing: 5) {
+                        Text(me?.name ?? "我")
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundStyle(.white)
+                        Image(systemName: "pencil")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.75))
+                    }
                     Text(store.db.members.count > 1
                          ? "家庭账本 · \(store.db.members.count) 位成员"
-                         : "家庭账本")
+                         : "点这里改名字和头像")
                         .font(.system(size: 12))
                         .foregroundStyle(.white.opacity(0.8))
                 }
                 Spacer()
             }
+            .contentShape(Rectangle())
+            .onTapGesture { showSelf = true }
 
             Rectangle().fill(.white.opacity(0.18)).frame(height: 0.8)
 
@@ -375,30 +384,59 @@ struct MeView: View {
             HStack(spacing: 8) {
                 ForEach(store.db.members) { m in
                     let on = m.id == store.selfMemberId
-                    Button {
-                        sync.setSelfMember(m.id)
-                    } label: {
-                        HStack(spacing: 5) {
-                            Text(m.emoji).font(.system(size: 14))
-                            Text(m.name)
-                                .font(.system(size: 13, weight: on ? .semibold : .regular))
-                                .foregroundStyle(on ? Theme.brand : Theme.ink2)
-                        }
-                        .padding(.horizontal, 12).padding(.vertical, 8)
-                        .background(on ? Theme.brandSoft : Theme.card2,
-                                    in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
-                            .strokeBorder(on ? Theme.brand.opacity(0.5) : Theme.line, lineWidth: on ? 1.2 : 0.7))
+                    HStack(spacing: 5) {
+                        Text(m.emoji).font(.system(size: 14))
+                        Text(m.name)
+                            .font(.system(size: 13, weight: on ? .semibold : .regular))
+                            .foregroundStyle(on ? Theme.brand : Theme.ink2)
+                            .lineLimit(1)
                     }
-                    .buttonStyle(.plain)
+                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    .background(on ? Theme.brandSoft : Theme.card2,
+                                in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .strokeBorder(on ? Theme.brand.opacity(0.5) : Theme.line, lineWidth: on ? 1.2 : 0.7))
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        // 点自己 = 改资料，点对方 = 认领「这是我」
+                        if on { showSelf = true } else { sync.setSelfMember(m.id) }
+                    }
                 }
-                Spacer()
+                Spacer(minLength: 0)
             }
 
+            Rectangle().fill(Theme.line).frame(height: 0.7)
+
+            Button {
+                showSelf = true
+            } label: {
+                HStack {
+                    Text("我的昵称与头像")
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(Theme.ink)
+                    Spacer()
+                    Text("\(store.selfMember?.emoji ?? "🙂") \(store.selfMember?.name ?? "我")")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Theme.ink3)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.ink3)
+                }
+                .padding(.vertical, 2)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
             if store.db.members.count < 2 {
-                Text("另一台手机加入后会在这里出现对方。")
+                Text("另一台手机加入后会在这里出现对方；两台手机各自改自己的名字，改完会同步过去。")
                     .font(.system(size: 11.5))
                     .foregroundStyle(Theme.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("点自己那枚可以改名字；点对方那枚表示「那是我」，之后记的账就挂在那个名字下。")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .cardStyle()
@@ -466,6 +504,93 @@ struct MeView: View {
 
     private func refreshPhotoStatus() async {
         photoStatus = await statusText()
+    }
+}
+
+// MARK: - 我的昵称
+
+struct MemberSheet: View {
+    var member: FamilyMember?
+
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var store = LedgerStore.shared
+
+    @State private var name = ""
+    @State private var emoji = "🙂"
+    @State private var loaded = false
+
+    private let emojis = ["🙂", "😀", "😎", "🐱", "🐶", "🐰", "🐻", "🦊", "🐳", "🍀", "🌻", "🍑"]
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(spacing: 10) {
+                        Text(emoji).font(.system(size: 44))
+                        TextField("你的昵称", text: $name)
+                            .font(.system(size: 18, weight: .semibold))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 11)
+                            .background(Theme.card2, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(Theme.line, lineWidth: 0.7))
+                        Text("最多 12 个字。两台手机各自改自己的，改完会同步给对方。")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(Theme.ink3)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 4)
+
+                    Text("头像")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.ink2)
+
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 52), spacing: 8)], spacing: 8) {
+                        ForEach(emojis, id: \.self) { e in
+                            Text(e)
+                                .font(.system(size: 22))
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 46)
+                                .background(e == emoji ? Theme.brandSoft : Theme.card2,
+                                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .strokeBorder(e == emoji ? Theme.brand.opacity(0.5) : Theme.line,
+                                                  lineWidth: e == emoji ? 1.2 : 0.7))
+                                .contentShape(Rectangle())
+                                .onTapGesture { emoji = e }
+                        }
+                    }
+                }
+                .padding(16)
+            }
+            .background(Theme.bg)
+            .navigationTitle("我的资料")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") { save() }
+                        .fontWeight(.semibold)
+                        .disabled(member == nil || name.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            .onAppear {
+                guard !loaded else { return }
+                loaded = true
+                name = member?.name ?? "我"
+                emoji = member?.emoji ?? "🙂"
+            }
+        }
+    }
+
+    private func save() {
+        guard let m = member else { return }
+        store.updateMember(id: m.id, name: name, emoji: emoji)
+        dismiss()
     }
 }
 

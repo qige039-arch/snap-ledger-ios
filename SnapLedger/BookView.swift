@@ -1,9 +1,12 @@
 //
 //  BookView.swift
-//  账本：日 / 月 / 年三个粒度，能翻页，能改能删
+//  账本：日 / 月 / 年三个粒度，能翻页，能改能删，能管多个账本
 //
-//  网页版是「日/月/年 + hero + 分组列表」，这里保持一致，
-//  但把两件事做成了原生才有的手感：滑动翻页的动画、点击直接改账。
+//  这一版改了三件事（都是真机上暴露出来的）：
+//   1. 日/月/年 切换条移出 ScrollView，放在固定页头。之前它在 LazyVStack 里，
+//      点「年」经常没反应 —— 这类「点击被列表吃掉」的问题只有挪出去才断根。
+//   2. 账本可建可改可删可切（旅行、装修、生意分开记），记录带 book 归属。
+//   3. 编辑页补了时间、支付方式、备注、所属账本 —— 记错了不能改时间是很要命的。
 //
 
 import SwiftUI
@@ -20,6 +23,7 @@ struct BookView: View {
     @State private var missingDay: Date?       // 点了却没有任何记录的那天
     @State private var undoRecord: LedgerRecord?   // 刚删掉的，给 4 秒反悔期
     @State private var undoTimer: Task<Void, Never>?
+    @State private var showBooks = false
 
     private let scopeTitles = ["日", "月", "年"]
 
@@ -52,7 +56,7 @@ struct BookView: View {
 
     private var subTitle: String {
         let n = store.count(from: range.start, to: range.end)
-        return n == 0 ? "这个范围还没有账" : "共 \(n) 笔"
+        return n == 0 ? "还没有账" : "共 \(n) 笔"
     }
 
     private var totals: (income: Double, expense: Double) {
@@ -65,17 +69,16 @@ struct BookView: View {
         VStack(spacing: 0) {
             header
 
-            if undoRecord != nil {
-                undoBar
-                    .transition(.move(edge: .top).combined(with: .opacity))
+            if let r = undoRecord {
+                UndoBar(text: "已删除 \(r.category) \(Money.currency(r.amount))") {
+                    undoDelete()
+                }
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
 
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 14) {
-                        ScopeSegmented(titles: scopeTitles, index: $scopeIndex)
-                            .padding(.horizontal, 16)
-
                         HeroCard(label: scopeIndex == 0 ? "当日支出" : (scopeIndex == 1 ? "本月支出" : "本年支出"),
                                  amount: totals.expense,
                                  income: totals.income,
@@ -92,11 +95,11 @@ struct BookView: View {
 
                         content
                     }
-                    .padding(.top, 4)
+                    .padding(.top, 10)
                     .padding(.bottom, 28)
                 }
-                // 只给翻页加隐式动画。scopeIndex 的动画交给 ScopeSegmented 自己做，
-                // 两处同时上动画会和 LazyVStack 的项目增删打架，切换看起来像「没反应」。
+                // 只给翻页留动画。scopeIndex 的动画交给页头的 ScopeBar 自己，
+                // 两处同时上动画会和 LazyVStack 的增删打架。
                 .animation(.easeOut(duration: 0.22), value: anchor)
             }
         }
@@ -109,51 +112,101 @@ struct BookView: View {
             heatPick = nil
             missingDay = nil
         }
+        .onChange(of: store.currentBookId) { _, _ in
+            heatPick = nil
+            missingDay = nil
+            anchor = Date()
+        }
         .sheet(item: $editing) { rec in
             RecordEditor(record: rec)
-                .presentationDetents([.medium, .large])
+                .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $showAdd, onDismiss: { addDate = nil }) {
             RecordEditor(record: nil, presetDate: addDate)
-                .presentationDetents([.medium, .large])
+                .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showBooks) {
+            BookSwitcherSheet()
+        }
+    }
+
+    // MARK: 页头
+
+    private var header: some View {
+        VStack(spacing: 9) {
+            HStack(spacing: 8) {
+                Button {
+                    showBooks = true
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(store.currentBook?.emoji ?? "🏠")
+                            .font(.system(size: 15))
+                        Text(store.currentBook?.name ?? "家庭账本")
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundStyle(Theme.ink)
+                            .lineLimit(1)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(Theme.ink3)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                Spacer(minLength: 6)
+
+                HStack(spacing: 7) {
+                    navButton("chevron.left") { step(-1) }
+                    navButton("chevron.right") { step(1) }
+                }
+            }
+
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(Theme.ink2)
+                        .lineLimit(1)
+                    Text(subTitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.ink3)
+                }
+
+                Spacer(minLength: 6)
+
+                ScopeBar(titles: scopeTitles, index: $scopeIndex)
+                    .frame(width: 148)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 4)
+        .padding(.bottom, 10)
+        .background(Theme.bg)
+    }
+
+    private func navButton(_ icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.ink2)
+                .frame(width: 30, height: 30)
+                .background(Theme.card, in: Circle())
+                .overlay(Circle().strokeBorder(Theme.line, lineWidth: 0.7))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func step(_ dir: Int) {
+        let cal = Fmt.cal
+        let comp: Calendar.Component = scopeIndex == 0 ? .day : (scopeIndex == 1 ? .month : .year)
+        if let d = cal.date(byAdding: comp, value: dir, to: anchor) {
+            anchor = d
         }
     }
 
     // MARK: 删除 / 撤销
-
-    /// 删完不弹窗、不打断，只在顶部留 4 秒反悔期
-    private var undoBar: some View {
-        HStack(spacing: 9) {
-            Image(systemName: "trash")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Theme.expense)
-            Text("已删除这笔账")
-                .font(.system(size: 12.5))
-                .foregroundStyle(Theme.ink2)
-            Spacer(minLength: 6)
-            Button {
-                undoDelete()
-            } label: {
-                Text("撤销")
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .foregroundStyle(Theme.brand)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
-        .background(Theme.card)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Theme.line).frame(height: 0.7)
-        }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 8)
-    }
 
     private func remove(_ r: LedgerRecord) {
         store.delete(id: r.id)
@@ -205,58 +258,23 @@ struct BookView: View {
         }
     }
 
-    private var header: some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 22, weight: .bold))
-                    .foregroundStyle(Theme.ink)
-                Text(subTitle)
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(Theme.ink3)
-            }
-
-            Spacer(minLength: 8)
-
-            HStack(spacing: 8) {
-                navButton("chevron.left") { step(-1) }
-                navButton("chevron.right") { step(1) }
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 6)
-        .padding(.bottom, 10)
-        .background(Theme.bg)
-    }
-
-    private func navButton(_ icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Theme.ink2)
-                .frame(width: 32, height: 32)
-                .background(Theme.card, in: Circle())
-                .overlay(Circle().strokeBorder(Theme.line, lineWidth: 0.7))
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func step(_ dir: Int) {
-        let cal = Fmt.cal
-        let comp: Calendar.Component = scopeIndex == 0 ? .day : (scopeIndex == 1 ? .month : .year)
-        if let d = cal.date(byAdding: comp, value: dir, to: anchor) {
-            anchor = d
-        }
-    }
-
     // MARK: 内容
 
     @ViewBuilder
     private var content: some View {
-        if scopeIndex == 2 {
+        switch scopeIndex {
+        case 0:
+            dayContent
+        case 1:
+            monthContent
+        default:
             yearList
-        } else if scopeIndex == 0 {
-            let groups = store.dayGroups(from: range.start, to: range.end)
+        }
+    }
+
+    private var dayContent: some View {
+        let groups = store.dayGroups(from: range.start, to: range.end)
+        return Group {
             if groups.isEmpty {
                 emptyState
             } else {
@@ -265,13 +283,15 @@ struct BookView: View {
                         .padding(.horizontal, 16)
                 }
             }
-        } else {
-            let groups = store.dayGroups(from: range.start, to: range.end)
+        }
+    }
 
+    private var monthContent: some View {
+        let groups = store.dayGroups(from: range.start, to: range.end)
+        return Group {
             if let md = missingDay {
                 missingCard(md).id("missing")
             }
-
             if groups.isEmpty {
                 emptyState
             } else {
@@ -323,13 +343,16 @@ struct BookView: View {
     }
 
     /// 年视图：12 个月的可点行，点进去直接落到那个月
+    ///
+    /// 刻意不用 GeometryReader 画占比条 —— 它没有固有尺寸，塞进 LazyVStack 的
+    /// Button 里会把行高算错。固定 92pt 轨道 + 叠加填充，行为完全可预测。
     private var yearList: some View {
         let year = Fmt.cal.component(.year, from: anchor)
         let buckets = store.yearMonthBuckets(year: year)
         let maxV = max(buckets.map { $0.expense }.max() ?? 0, 1)
         return VStack(spacing: 0) {
             HStack {
-                Text("12 个月支出")
+                Text("12 个月")
                     .font(.system(size: 12.5, weight: .medium))
                     .foregroundStyle(Theme.ink2)
                 Spacer()
@@ -339,56 +362,75 @@ struct BookView: View {
             }
             .padding(.horizontal, 14)
             .padding(.top, 12)
-            .padding(.bottom, 6)
+            .padding(.bottom, 4)
 
             ForEach(buckets) { b in
-                let monthIndex = Int(b.key.split(separator: "-").last.map(String.init) ?? "0") ?? 0
                 Button {
-                    var c = DateComponents()
-                    c.year = year
-                    c.month = monthIndex
-                    c.day = 1
-                    if let d = Fmt.cal.date(from: c) {
-                        anchor = d
-                        scopeIndex = 1
-                    }
+                    tapMonth(b.key, year: year)
                 } label: {
-                    HStack(spacing: 12) {
-                        Text(b.label)
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(Theme.ink)
-                            .frame(width: 42, alignment: .leading)
-
-                        // 迷你占比条：一眼看出哪个月花得多
-                        GeometryReader { geo in
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(Theme.line.opacity(0.7))
-                                Capsule()
-                                    .fill(b.expense > 0 ? Theme.brand.opacity(0.75) : Color.clear)
-                                    .frame(width: max(3, geo.size.width * (b.expense / maxV)))
-                            }
-                        }
-                        .frame(height: 6)
-
-                        Text(b.expense > 0 ? Money.currency(b.expense) : "—")
-                            .font(.system(size: 13.5, weight: .medium, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundStyle(b.expense > 0 ? Theme.ink : Theme.ink3)
-                            .frame(width: 78, alignment: .trailing)
-                    }
-                    .padding(.vertical, 11)
-                    .contentShape(Rectangle())
+                    yearRow(b, maxV: maxV)
                 }
                 .buttonStyle(.plain)
 
                 if b.key != buckets.last?.key {
-                    Rectangle().fill(Theme.line).frame(height: 0.7).padding(.leading, 54)
+                    Rectangle().fill(Theme.line).frame(height: 0.7).padding(.leading, 14)
                 }
             }
         }
+        .cardStyle(padding: 0)
         .padding(.horizontal, 16)
-        .cardStyle(padding: 6)
-        .padding(.horizontal, 16)
+    }
+
+    private func yearRow(_ b: Bucket, maxV: Double) -> some View {
+        let ratio = max(0, min(1, b.expense / maxV))
+        return HStack(spacing: 10) {
+            Text(b.label)
+                .font(.system(size: 13.5, weight: .medium))
+                .foregroundStyle(b.expense > 0 ? Theme.ink : Theme.ink3)
+                .frame(width: 38, alignment: .leading)
+
+            Capsule()
+                .fill(Theme.line.opacity(0.75))
+                .frame(width: 92, height: 6)
+                .overlay(alignment: .leading) {
+                    Capsule()
+                        .fill(Theme.brand.opacity(0.8))
+                        .frame(width: b.expense > 0 ? max(4, 92 * ratio) : 0, height: 6)
+                }
+
+            Spacer(minLength: 6)
+
+            if b.income > 0 {
+                Text("+" + Money.plain(b.income))
+                    .font(.system(size: 10.5, design: .rounded))
+                    .foregroundStyle(Theme.income)
+            }
+
+            Text(b.expense > 0 ? Money.currency(b.expense) : "—")
+                .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(b.expense > 0 ? Theme.ink : Theme.ink3)
+                .frame(width: 76, alignment: .trailing)
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Theme.ink3)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .contentShape(Rectangle())
+    }
+
+    private func tapMonth(_ key: String, year: Int) {
+        guard let m = Int(key.split(separator: "-").last.map(String.init) ?? "") else { return }
+        var c = DateComponents()
+        c.year = year
+        c.month = m
+        c.day = 1
+        if let d = Fmt.cal.date(from: c) {
+            anchor = d
+            scopeIndex = 1
+        }
     }
 
     private func groupCard(_ g: DayGroup, showHeader: Bool) -> some View {
@@ -440,7 +482,7 @@ struct BookView: View {
             Text("这段时间还没有账")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundStyle(Theme.ink2)
-            Text("回到聊天页说一句「午饭 32」，或者点下面加一笔")
+            Text("回到记账页说一句「午饭 32」，或者点下面加一笔")
                 .font(.system(size: 12.5))
                 .foregroundStyle(Theme.ink3)
                 .multilineTextAlignment(.center)
@@ -502,7 +544,7 @@ struct RecordLine: View {
         .clipped()
     }
 
-    /// 只有可删的行才挂手势和长按菜单（聊天里的只读记录不挂，免得出现空菜单）
+    /// 只有可删的行才挂手势和长按菜单（别人的只读记录不挂，免得出现空菜单）
     @ViewBuilder
     private var rowBody: some View {
         if let del = onDelete {
@@ -511,6 +553,9 @@ struct RecordLine: View {
                 .offset(x: dx)
                 .simultaneousGesture(swipe)
                 .contextMenu {
+                    if let tap = onTap {
+                        Button { tap() } label: { Label("修改这笔", systemImage: "pencil") }
+                    }
                     Button(role: .destructive) { del() } label: {
                         Label("删除这笔", systemImage: "trash")
                     }
@@ -529,25 +574,32 @@ struct RecordLine: View {
                 EmojiBadge(emoji: record.emoji, tint: Tint.of(record.category))
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(record.merchant.isEmpty ? record.category : record.merchant)
+                    Text(record.title)
                         .font(.system(size: 14.5, weight: .medium))
                         .foregroundStyle(Theme.ink)
                         .lineLimit(1)
 
                     HStack(spacing: 5) {
                         Text(record.category)
+                        if !record.method.isEmpty {
+                            Text("·")
+                            Text(record.method)
+                        }
                         Text("·")
                         Text(record.member.isEmpty ? "我" : memberName)
                         Text("·")
                         Text(Fmt.hm(record.ts))
-                        if !record.note.isEmpty {
-                            Text("·")
-                            Text(record.note).lineLimit(1)
-                        }
                     }
                     .font(.system(size: 11.5))
                     .foregroundStyle(Theme.ink3)
                     .lineLimit(1)
+
+                    if !record.note.isEmpty {
+                        Text(record.note)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(Theme.ink3)
+                            .lineLimit(1)
+                    }
                 }
 
                 Spacer(minLength: 6)
@@ -598,9 +650,15 @@ struct RecordEditor: View {
     @State private var isIncome: Bool = false
     @State private var category: String = "其他"
     @State private var emoji: String = "📦"
+    @State private var note: String = ""
+    @State private var method: String = ""
+    @State private var bookId: String = ""
+    @State private var date: Date = Date()
     @State private var showDeleteConfirm = false
+    @State private var loaded = false
 
     private let cols = [GridItem(.adaptive(minimum: 74), spacing: 8)]
+    private let methods = ["支付宝", "微信", "银行卡", "现金", "其他"]
 
     private var categories: [BillCategory] {
         isIncome ? BillParser.incomeCategories : BillParser.expenseCategories
@@ -609,90 +667,27 @@ struct RecordEditor: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    // 金额
-                    VStack(spacing: 6) {
-                        if let d = presetDate, record == nil {
-                            Text("补记 " + Fmt.dayLong(d))
-                                .font(.system(size: 11.5, weight: .medium))
-                                .foregroundStyle(Theme.brand)
-                        }
-                        Text(isIncome ? "收入金额" : "支出金额")
-                            .font(.system(size: 12))
-                            .foregroundStyle(Theme.ink3)
-                        HStack(alignment: .firstTextBaseline, spacing: 4) {
-                            Text("¥")
-                                .font(.system(size: 22, weight: .semibold, design: .rounded))
-                                .foregroundStyle(Theme.ink3)
-                            TextField("0", text: $amountText)
-                                .keyboardType(.decimalPad)
-                                .font(.system(size: 40, weight: .bold, design: .rounded))
-                                .foregroundStyle(Theme.ink)
-                                .multilineTextAlignment(.center)
-                                .frame(minWidth: 90)
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-                    .background(Theme.card2, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                VStack(alignment: .leading, spacing: 14) {
+                    amountBox
 
-                    ScopeSegmented(titles: ["支出", "收入"], index: Binding(
+                    ScopeBar(titles: ["支出", "收入"], index: Binding(
                         get: { isIncome ? 1 : 0 },
                         set: { isIncome = ($0 == 1) }
-                    ))
+                    ), fill: isIncome ? Theme.income : Theme.expense)
 
-                    // 删除放在这——之前贴在页面最底部，半屏高度时根本看不到，
-                    // 用户会以为「没有删除功能」
                     if record != nil {
-                        Button {
-                            showDeleteConfirm = true
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: "trash")
-                                    .font(.system(size: 12, weight: .semibold))
-                                Text("删除这笔")
-                                    .font(.system(size: 13.5, weight: .medium))
-                            }
-                            .foregroundStyle(Theme.expense)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            .background(Theme.expense.opacity(0.09),
-                                        in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
+                        deleteButton
                     }
+
+                    metaCard
 
                     Text("分类")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(Theme.ink2)
 
-                    LazyVGrid(columns: cols, spacing: 8) {
-                        ForEach(categories, id: \.name) { c in
-                            let on = c.name == category
-                            Button {
-                                category = c.name
-                                emoji = c.emoji
-                            } label: {
-                                VStack(spacing: 4) {
-                                    Text(c.emoji).font(.system(size: 19))
-                                    Text(c.name)
-                                        .font(.system(size: 11.5, weight: on ? .semibold : .regular))
-                                        .foregroundStyle(on ? Theme.brand : Theme.ink2)
-                                }
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 9)
-                                .background(on ? Theme.brandSoft : Theme.card2,
-                                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .strokeBorder(on ? Theme.brand.opacity(0.55) : Theme.line,
-                                                      lineWidth: on ? 1.2 : 0.7)
-                                )
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
+                    categoryGrid
+
+                    noteField
                 }
                 .padding(16)
             }
@@ -722,45 +717,457 @@ struct RecordEditor: View {
         }
     }
 
+    // MARK: 金额
+
+    private var amountBox: some View {
+        VStack(spacing: 6) {
+            Text(isIncome ? "收入金额" : "支出金额")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.ink3)
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text("¥")
+                    .font(.system(size: 22, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Theme.ink3)
+                TextField("0", text: $amountText)
+                    .keyboardType(.decimalPad)
+                    .font(.system(size: 40, weight: .bold, design: .rounded))
+                    .foregroundStyle(Theme.ink)
+                    .multilineTextAlignment(.center)
+                    .frame(minWidth: 90)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 16)
+        .background(Theme.card2, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    /// 删除放在收支切换下面：之前贴在页面最底部，半屏高度时根本看不到，
+    /// 用户会以为「没有删除功能」
+    private var deleteButton: some View {
+        Button {
+            showDeleteConfirm = true
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "trash")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("删除这笔")
+                    .font(.system(size: 13.5, weight: .medium))
+            }
+            .foregroundStyle(Theme.expense)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(Theme.expense.opacity(0.09),
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: 时间 / 支付方式 / 账本
+
+    private var metaCard: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Label("时间", systemImage: "clock")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.ink2)
+                Spacer()
+                DatePicker("", selection: $date, displayedComponents: [.date, .hourAndMinute])
+                    .labelsHidden()
+                    .datePickerStyle(.compact)
+            }
+
+            Rectangle().fill(Theme.line).frame(height: 0.7)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Label("支付方式", systemImage: "creditcard")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.ink2)
+
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 62), spacing: 8)], spacing: 8) {
+                    ForEach(methods, id: \.self) { m in
+                        let on = m == method
+                        Text(m)
+                            .font(.system(size: 12.5, weight: on ? .semibold : .regular))
+                            .foregroundStyle(on ? Theme.brand : Theme.ink2)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 30)
+                            .background(on ? Theme.brandSoft : Theme.card2,
+                                        in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .strokeBorder(on ? Theme.brand.opacity(0.5) : Theme.line,
+                                              lineWidth: on ? 1.2 : 0.7))
+                            .contentShape(Rectangle())
+                            .onTapGesture { method = on ? "" : m }
+                    }
+                }
+            }
+
+            if store.books.count > 1 {
+                Rectangle().fill(Theme.line).frame(height: 0.7)
+
+                Menu {
+                    ForEach(store.books) { b in
+                        Button {
+                            bookId = b.id
+                        } label: {
+                            Text("\(b.emoji) \(b.name)")
+                        }
+                    }
+                } label: {
+                    HStack {
+                        Label("所属账本", systemImage: "book.closed")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Theme.ink2)
+                        Spacer()
+                        let b = store.books.first { $0.id == bookId }
+                        Text(b == nil ? "未选择" : "\(b!.emoji) \(b!.name)")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Theme.ink)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Theme.ink3)
+                    }
+                    .contentShape(Rectangle())
+                }
+            }
+        }
+        .cardStyle(padding: 14)
+    }
+
+    private var categoryGrid: some View {
+        LazyVGrid(columns: cols, spacing: 8) {
+            ForEach(categories, id: \.name) { c in
+                let on = c.name == category
+                VStack(spacing: 4) {
+                    Text(c.emoji).font(.system(size: 19))
+                    Text(c.name)
+                        .font(.system(size: 11.5, weight: on ? .semibold : .regular))
+                        .foregroundStyle(on ? Theme.brand : Theme.ink2)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 9)
+                .background(on ? Theme.brandSoft : Theme.card2,
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(on ? Theme.brand.opacity(0.55) : Theme.line,
+                                      lineWidth: on ? 1.2 : 0.7)
+                )
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    category = c.name
+                    emoji = c.emoji
+                }
+            }
+        }
+    }
+
+    private var noteField: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("备注")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Theme.ink2)
+            TextField("可选，比如「和爸妈吃饭」", text: $note, axis: .vertical)
+                .lineLimit(2...4)
+                .font(.system(size: 14))
+                .foregroundStyle(Theme.ink)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Theme.card2, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Theme.line, lineWidth: 0.7))
+        }
+    }
+
+    // MARK: 存取
+
     private var parsedAmount: Double {
         Double(amountText.replacingOccurrences(of: ",", with: "")) ?? 0
     }
 
     private func load() {
-        guard let r = record else { return }
-        amountText = Money.plain(r.amount)
-        isIncome = r.isIncome
-        category = r.category
-        emoji = r.emoji
+        guard !loaded else { return }
+        loaded = true
+        if let r = record {
+            amountText = Money.plain(r.amount)
+            isIncome = r.isIncome
+            category = r.category
+            emoji = r.emoji
+            note = r.note
+            method = r.method
+            bookId = store.bookId(of: r)
+            date = Date(timeIntervalSince1970: r.ts / 1000)
+        } else {
+            bookId = store.currentBookId
+            // 补账：日期用那天，时分秒沿用此刻
+            if let d = presetDate {
+                let cal = Fmt.cal
+                let t = cal.dateComponents([.hour, .minute, .second], from: Date())
+                var c = cal.dateComponents([.year, .month, .day], from: d)
+                c.hour = t.hour
+                c.minute = t.minute
+                c.second = t.second
+                date = cal.date(from: c) ?? Date()
+            }
+        }
     }
 
     private func save() {
         let v = parsedAmount
         guard v > 0 else { return }
         let type = isIncome ? "income" : "expense"
+        let ts = date.timeIntervalSince1970 * 1000
         if let r = record {
-            store.update(id: r.id, amount: v, category: category, emoji: emoji, type: type)
+            store.update(id: r.id, amount: v, category: category, emoji: emoji,
+                         type: type, note: note, method: method, ts: ts, book: bookId)
         } else {
-            var rec = LedgerRecord(ts: stamp(), type: type, amount: v,
-                                   category: category, emoji: emoji)
+            var rec = LedgerRecord(ts: ts, type: type, amount: v,
+                                   category: category, emoji: emoji,
+                                   method: method, note: note)
             rec.member = store.selfMemberId
+            rec.book = bookId.isEmpty ? store.currentBookId : bookId
             store.add(rec)
         }
         dismiss()
     }
+}
 
-    /// 补账时用那天的日期 + 此刻的时分秒，否则一律记成现在
-    private func stamp() -> Double {
-        let now = Date()
-        guard record == nil, let d = presetDate else {
-            return now.timeIntervalSince1970 * 1000
+// MARK: - 切换账本
+
+struct BookSwitcherSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var store = LedgerStore.shared
+
+    @State private var editing: LedgerBook?
+    @State private var creating = false
+    @State private var doomed: LedgerBook?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(store.books) { b in
+                        Button {
+                            store.switchBook(b.id)
+                            dismiss()
+                        } label: {
+                            bookRow(b)
+                        }
+                        .buttonStyle(.plain)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            if store.books.count > 1 {
+                                Button(role: .destructive) {
+                                    doomed = b
+                                } label: {
+                                    Label("删除", systemImage: "trash")
+                                }
+                            }
+                            Button {
+                                editing = b
+                            } label: {
+                                Label("改名", systemImage: "pencil")
+                            }
+                            .tint(Theme.brand)
+                        }
+                        .contextMenu {
+                            Button { editing = b } label: { Label("改名 / 换图标", systemImage: "pencil") }
+                            if store.books.count > 1 {
+                                Button(role: .destructive) { doomed = b } label: {
+                                    Label("删除账本", systemImage: "trash")
+                                }
+                            }
+                        }
+                    }
+                } header: {
+                    Text("点一下切换，左滑改名或删除")
+                } footer: {
+                    Text("每个账本的记录互不打扰，统计也只统计当前账本。两台手机通过家庭账本同步时，账本本身也会同步过去。")
+                }
+
+                Section {
+                    Button {
+                        creating = true
+                    } label: {
+                        Label("新建账本", systemImage: "plus.circle.fill")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(Theme.brand)
+                    }
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(Theme.bg)
+            .navigationTitle("我的账本")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                }
+            }
+            .sheet(item: $editing) { b in
+                BookEditorSheet(book: b)
+            }
+            .sheet(isPresented: $creating) {
+                BookEditorSheet(book: nil)
+            }
+            .confirmationDialog(
+                doomed.map { "删除「\($0.name)」？" } ?? "",
+                isPresented: Binding(get: { doomed != nil }, set: { if !$0 { doomed = nil } }),
+                titleVisibility: .visible
+            ) {
+                Button("删除账本和里面的记录", role: .destructive) {
+                    if let b = doomed { store.deleteBook(id: b.id) }
+                    doomed = nil
+                }
+                Button("取消", role: .cancel) { doomed = nil }
+            } message: {
+                if let b = doomed {
+                    Text("里面的 \(store.count(inBook: b.id)) 笔记录会一起删除，另一台手机同步后也会消失。")
+                }
+            }
         }
-        let cal = Fmt.cal
-        let t = cal.dateComponents([.hour, .minute, .second], from: now)
-        var c = cal.dateComponents([.year, .month, .day], from: d)
-        c.hour = t.hour
-        c.minute = t.minute
-        c.second = t.second
-        return (cal.date(from: c) ?? now).timeIntervalSince1970 * 1000
+    }
+
+    private func bookRow(_ b: LedgerBook) -> some View {
+        let on = b.id == store.currentBookId
+        let n = store.count(inBook: b.id)
+        return HStack(spacing: 12) {
+            Text(b.emoji)
+                .font(.system(size: 20))
+                .frame(width: 38, height: 38)
+                .background(Theme.card2, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(b.name)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(Theme.ink)
+                Text(n == 0 ? "还没有记录" : "\(n) 笔")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.ink3)
+            }
+
+            Spacer()
+
+            if on {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 17))
+                    .foregroundStyle(Theme.brand)
+            }
+        }
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+    }
+}
+
+// MARK: - 新建 / 改名账本
+
+struct BookEditorSheet: View {
+    var book: LedgerBook?
+
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var store = LedgerStore.shared
+
+    @State private var name = ""
+    @State private var emoji = "🏠"
+    @State private var loaded = false
+
+    private let emojis = ["🏠", "✈️", "🍜", "🎁", "🏢", "🛒", "🎓", "🐾", "💊", "🚗", "🎉", "💰"]
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(spacing: 8) {
+                        Text(emoji).font(.system(size: 40))
+                        TextField("账本名，比如「装修」", text: $name)
+                            .font(.system(size: 17, weight: .medium))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                            .background(Theme.card2, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(Theme.line, lineWidth: 0.7))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+
+                    Text("图标")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.ink2)
+
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 52), spacing: 8)], spacing: 8) {
+                        ForEach(emojis, id: \.self) { e in
+                            Text(e)
+                                .font(.system(size: 22))
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 46)
+                                .background(e == emoji ? Theme.brandSoft : Theme.card2,
+                                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .strokeBorder(e == emoji ? Theme.brand.opacity(0.5) : Theme.line,
+                                                  lineWidth: e == emoji ? 1.2 : 0.7))
+                                .contentShape(Rectangle())
+                                .onTapGesture { emoji = e }
+                        }
+                    }
+
+                    if book == nil {
+                        Text("常用模板")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Theme.ink2)
+
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 8)], spacing: 8) {
+                            ForEach(Array(LedgerBook.presets.enumerated()), id: \.offset) { _, p in
+                                HStack(spacing: 5) {
+                                    Text(p.emoji).font(.system(size: 14))
+                                    Text(p.name)
+                                        .font(.system(size: 12.5))
+                                        .foregroundStyle(Theme.ink2)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 34)
+                                .background(Theme.card2, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    emoji = p.emoji
+                                    name = p.name
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(16)
+            }
+            .background(Theme.bg)
+            .navigationTitle(book == nil ? "新建账本" : "修改账本")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") { save() }
+                        .fontWeight(.semibold)
+                        .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            .onAppear {
+                guard !loaded else { return }
+                loaded = true
+                if let b = book {
+                    name = b.name
+                    emoji = b.emoji
+                }
+            }
+        }
+    }
+
+    private func save() {
+        if let b = book {
+            store.renameBook(id: b.id, name: name, emoji: emoji)
+        } else {
+            store.addBook(name: name, emoji: emoji)
+        }
+        dismiss()
     }
 }

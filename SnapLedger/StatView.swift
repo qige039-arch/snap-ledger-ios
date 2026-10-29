@@ -85,9 +85,6 @@ struct StatView: View {
 
             ScrollView {
                 VStack(spacing: 14) {
-                    ScopeSegmented(titles: scopeTitles, index: $scopeIndex)
-                        .padding(.horizontal, 16)
-
                     directionSwitch
                         .padding(.horizontal, 16)
 
@@ -100,34 +97,43 @@ struct StatView: View {
                     rankingCard
                         .padding(.horizontal, 16)
                 }
-                .padding(.top, 4)
+                .padding(.top, 10)
                 .padding(.bottom, 28)
             }
             .animation(.easeOut(duration: 0.22), value: anchor)
             .animation(.easeOut(duration: 0.22), value: showIncome)
         }
         .background(Theme.bg)
+        .onChange(of: store.currentBookId) { _, _ in
+            anchor = Date()
+        }
     }
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("统计")
-                    .font(.system(size: 22, weight: .bold))
-                    .foregroundStyle(Theme.ink)
-                Text(title)
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(Theme.ink3)
+        VStack(spacing: 9) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("统计")
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(Theme.ink)
+                    Text(title + " · " + (store.currentBook?.name ?? "家庭账本"))
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.ink3)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                HStack(spacing: 7) {
+                    navButton("chevron.left") { step(-1) }
+                    navButton("chevron.right") { step(1) }
+                }
             }
-            Spacer(minLength: 8)
-            HStack(spacing: 8) {
-                navButton("chevron.left") { step(-1) }
-                navButton("chevron.right") { step(1) }
-            }
+
+            ScopeBar(titles: scopeTitles, index: $scopeIndex)
         }
         .padding(.horizontal, 16)
-        .padding(.top, 6)
+        .padding(.top, 4)
         .padding(.bottom, 10)
+        .background(Theme.bg)
     }
 
     private func navButton(_ icon: String, action: @escaping () -> Void) -> some View {
@@ -135,7 +141,7 @@ struct StatView: View {
             Image(systemName: icon)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Theme.ink2)
-                .frame(width: 32, height: 32)
+                .frame(width: 30, height: 30)
                 .background(Theme.card, in: Circle())
                 .overlay(Circle().strokeBorder(Theme.line, lineWidth: 0.7))
         }
@@ -176,7 +182,11 @@ struct StatView: View {
     private var tiles: some View {
         HStack(spacing: 10) {
             tile(title: "总计", value: Money.currency(focusTotal))
-            tile(title: "日均", value: Money.currency(focusTotal / days))
+            if scopeIndex == 0 {
+                tile(title: "笔数", value: "\(records.count)")
+            } else {
+                tile(title: "日均", value: Money.currency(focusTotal / days))
+            }
             tile(title: "最大一笔", value: maxSingle > 0 ? Money.currency(maxSingle) : "—")
         }
     }
@@ -202,10 +212,19 @@ struct StatView: View {
     // MARK: 趋势
 
     private var buckets: [Bucket] {
-        if scopeIndex == 0 { return [] }
+        // 日视图按小时分桶：一天里「几点花的钱」比「这一天总共花了多少」有用得多
+        if scopeIndex == 0 { return store.hourBuckets(on: anchor) }
         if scopeIndex == 1 { return store.dayBuckets(from: range.start, to: range.end) }
         let year = Fmt.cal.component(.year, from: anchor)
         return store.yearMonthBuckets(year: year)
+    }
+
+    private var chartTitle: String {
+        switch scopeIndex {
+        case 0: return "分时走势"
+        case 1: return "每天走势"
+        default: return "每月走势"
+        }
     }
 
     @ViewBuilder
@@ -213,7 +232,7 @@ struct StatView: View {
         let data = buckets
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(scopeIndex == 1 ? "每天走势" : "每月走势")
+                Text(chartTitle)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Theme.ink)
                 Spacer()

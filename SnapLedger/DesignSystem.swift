@@ -136,53 +136,42 @@ struct MoneyText: View {
     }
 }
 
-// MARK: - 分段控件
+// MARK: - 分段切换
 
-/// 自绘分段控件：系统 Picker 的 .segmented 在中文字号下偏挤
+/// 日 / 月 / 年 与 支出 / 收入 用的切换条
 ///
-/// 这里踩过两个坑，别再走回去：
-/// 1. `.overlay(Shape)` 会吃掉内部 Button 的点击 —— 整条控件看起来「点了没反应」。
-///    必须给 overlay 加 `.allowsHitTesting(false)`。
-/// 2. `matchedGeometryEffect` 在 LazyVStack / 带隐式动画的 ScrollView 里会让切换帧丢掉，
-///    同样表现为点了不切。改成「每段自己带背景」，靠 `.animation(value:)` 过渡，稳。
-struct ScopeSegmented: View {
+/// 这里踩过太多坑，写下结论：**不要用 Button + 背景块**做这种控件。
+/// 之前那版（Button + matchedGeometryEffect + overlay 描边）在 LazyVStack 里
+/// 会出现「点了第三个不生效」，改了三次都没根治。现在只用「文字 + onTapGesture +
+/// 整块 contentShape」，命中区域就是肉眼看到的那一块，没有额外图层抢事件。
+/// 另外这两条切换条一律放在 ScrollView **外面**（页头固定），不再受列表手势影响。
+struct ScopeBar: View {
     let titles: [String]
     @Binding var index: Int
-
-    @Environment(\.colorScheme) private var scheme
+    var fill: Color = Theme.brand
 
     var body: some View {
         HStack(spacing: 2) {
-            ForEach(titles.indices, id: \.self) { i in
-                Button {
-                    guard i != index else { return }
-                    index = i
-                } label: {
-                    Text(titles[i])
-                        .font(.system(size: 14, weight: i == index ? .semibold : .regular))
-                        .foregroundStyle(i == index ? Theme.ink : Theme.ink2)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 7)
-                        .background {
-                            // 背景恒存在（未选中是透明），三段的命中区域才一样大
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                .fill(i == index ? Theme.card : Color.clear)
-                                .shadow(color: .black.opacity(i == index ? (scheme == .dark ? 0.4 : 0.08) : 0),
-                                        radius: i == index ? 3 : 0,
-                                        x: 0,
-                                        y: i == index ? 1 : 0)
-                        }
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
+            ForEach(Array(titles.enumerated()), id: \.offset) { i, title in
+                Text(title)
+                    .font(.system(size: 13.5, weight: i == index ? .semibold : .regular))
+                    .foregroundStyle(i == index ? Color.white : Theme.ink2)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 30)
+                    .background {
+                        Capsule().fill(i == index ? fill : Color.clear)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        guard i != index else { return }
+                        index = i
+                    }
             }
         }
         .padding(3)
-        .background(Theme.card2, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(Theme.card2, in: Capsule())
         .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Theme.line, lineWidth: 0.7)
-                .allowsHitTesting(false)
+            Capsule().strokeBorder(Theme.line, lineWidth: 0.7).allowsHitTesting(false)
         }
         .animation(.easeOut(duration: 0.16), value: index)
     }
@@ -325,52 +314,94 @@ struct HeroCard: View {
     }
 }
 
+// MARK: - 撤销条
+
+/// 删除后的 4 秒反悔期。做成组件是因为账本页、聊天页、全部记录页都要用，
+/// 三处各写一遍必然文案和间距走形。
+struct UndoBar: View {
+    let text: String
+    var onUndo: () -> Void
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "trash")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(Theme.expense)
+            Text(text)
+                .font(.system(size: 12.5))
+                .foregroundStyle(Theme.ink2)
+                .lineLimit(1)
+            Spacer(minLength: 6)
+            Button(action: onUndo) {
+                Text("撤销")
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(Theme.brand)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(Theme.card)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Theme.line).frame(height: 0.7)
+        }
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Theme.line).frame(height: 0.7)
+        }
+    }
+}
+
 // MARK: - 日期格式
 
+/// DateFormatter 创建一次要几十微秒，列表里每行都 new 一次是卡顿的主要来源。
+/// 全部缓存成 static，只改配置不再重建。
 enum Fmt {
     static let cal = Calendar.current
 
-    static func dayKey(_ date: Date) -> String {
+    private static func make(_ pattern: String) -> DateFormatter {
         let f = DateFormatter()
-        f.dateFormat = "M月d日"
-        return f.string(from: date)
+        f.locale = Locale(identifier: "zh_CN")
+        f.dateFormat = pattern
+        return f
     }
+
+    private static let fKey = make("yyyy-MM-dd")
+    private static let fDayNum = make("d")
+    private static let fMD = make("M月d日")
+    private static let fWeek = make("EEE")
+    private static let fYM = make("yyyy年M月")
+    private static let fY = make("yyyy年")
+    private static let fHM = make("HH:mm")
+    private static let fMDHM = make("M月d日 HH:mm")
+
+    /// 2026-10-29，和月历格子的 key 同源
+    static func key(_ date: Date) -> String { fKey.string(from: date) }
+
+    static func dayNumber(_ date: Date) -> String { fDayNum.string(from: date) }
+
+    static func dayKey(_ date: Date) -> String { fMD.string(from: date) }
 
     /// 「10月28日 周三」
     static func dayLong(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "M月d日"
-        var s = f.string(from: date)
-        let wf = DateFormatter()
-        wf.locale = Locale(identifier: "zh_CN")
-        wf.dateFormat = "EEE"
-        s += " " + wf.string(from: date)
+        var s = fMD.string(from: date)
+        s += " " + fWeek.string(from: date)
         if cal.isDateInToday(date) { s += " · 今天" }
         else if cal.isDateInYesterday(date) { s += " · 昨天" }
         return s
     }
 
-    static func monthTitle(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy年M月"
-        return f.string(from: date)
-    }
+    static func monthTitle(_ date: Date) -> String { fYM.string(from: date) }
 
-    static func yearTitle(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy年"
-        return f.string(from: date)
-    }
+    static func yearTitle(_ date: Date) -> String { fY.string(from: date) }
 
     static func hm(_ ms: Double) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm"
-        return f.string(from: Date(timeIntervalSince1970: ms / 1000))
+        fHM.string(from: Date(timeIntervalSince1970: ms / 1000))
     }
 
     static func mdhm(_ ms: Double) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "M月d日 HH:mm"
-        return f.string(from: Date(timeIntervalSince1970: ms / 1000))
+        fMDHM.string(from: Date(timeIntervalSince1970: ms / 1000))
     }
 }
