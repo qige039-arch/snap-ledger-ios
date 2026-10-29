@@ -551,4 +551,20 @@ enum Money {
     }
 
     static func currency(_ v: Double) -> String { "¥" + plain(v) }
+
+    private static let groupedFormatter: NumberFormatter = {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.groupingSeparator = ","
+        f.maximumFractionDigits = 2
+        return f
+    }()
+
+    /// 统计页的大金额加千分位：13204.24 → 13,204.24
+    ///
+    /// 列表行不用这个（窄，加了反而挤），只给统计里的大数字用。
+    static func grouped(_ v: Double) -> String {
+        groupedFormatter.minimumFractionDigits = (v == v.rounded()) ? 0 : 2
+        return groupedFormatter.string(from: NSNumber(value: v)) ?? plain(v)
+    }
 }

@@ -177,6 +177,102 @@ struct ScopeBar: View {
     }
 }
 
+// MARK: - 紧凑切换（卡头右上角用）
+
+/// 卡头里的小号切换条（支出/收入/结余、柱状/曲线、排序方式）
+///
+/// 和 ScopeBar 同一套做法：文字 + contentShape + onTapGesture。
+/// 宽度跟着文字走，不满占一行 —— 放进卡头右侧刚好。
+struct CompactSeg: View {
+    let titles: [String]
+    @Binding var index: Int
+    var fill: Color = Theme.brand
+
+    var body: some View {
+        HStack(spacing: 1) {
+            ForEach(Array(titles.enumerated()), id: \.offset) { i, title in
+                Text(title)
+                    .font(.system(size: 11.5, weight: i == index ? .semibold : .regular))
+                    .foregroundStyle(i == index ? Color.white : Theme.ink2)
+                    .padding(.horizontal, 8)
+                    .frame(height: 24)
+                    .background {
+                        Capsule().fill(i == index ? fill : Color.clear)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        guard i != index else { return }
+                        index = i
+                    }
+            }
+        }
+        .padding(2)
+        .background(Theme.card2, in: Capsule())
+        .overlay {
+            Capsule().strokeBorder(Theme.line, lineWidth: 0.7).allowsHitTesting(false)
+        }
+        .animation(.easeOut(duration: 0.16), value: index)
+    }
+}
+
+// MARK: - 统计小卡
+
+/// 汇总网格里的一格：小标题 + 大金额，可选一个小角标
+struct StatCell: View {
+    let title: String
+    let value: String
+    var color: Color = Theme.ink
+    var note: String?
+    var noteColor: Color = Theme.ink3
+    var showsCurrency: Bool = true
+    /// 负号要放在 ¥ 前面（-¥320），不能走进数字里变成 ¥-320
+    var sign: String = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Text(title)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.ink3)
+                if let note {
+                    Text(note)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(noteColor)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(noteColor.opacity(0.10),
+                                    in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                }
+                Spacer(minLength: 0)
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 2) {
+                if !sign.isEmpty {
+                    Text(sign)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(color)
+                }
+                if showsCurrency {
+                    Text("¥")
+                        .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                        .foregroundStyle(color.opacity(0.75))
+                }
+                Text(value)
+                    .font(.system(size: 19, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(color)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.62)
+            }
+        }
+        // 网格里同一行两格高度必须一致，否则视觉上是歪的
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .padding(.horizontal, 13)
+        .padding(.vertical, 11)
+        .cardStyle(padding: 0, radius: 15)
+    }
+}
+
 // MARK: - 图标底座
 
 struct EmojiBadge: View {
