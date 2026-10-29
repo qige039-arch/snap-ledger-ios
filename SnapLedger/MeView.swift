@@ -21,6 +21,8 @@ struct MeView: View {
     @State private var showAbout = false
     @State private var showService = false
     @State private var showSelf = false
+    @State private var showShare = false
+    @State private var shareURL: URL?
     @State private var showCodeCopied = false
 
     private var code: String { store.db.sync?.code ?? "" }
@@ -44,6 +46,7 @@ struct MeView: View {
                 familyCard
                 captureCard
                 identityCard
+                dataCard
                 serviceCard
                 aboutCard
             }
@@ -60,6 +63,11 @@ struct MeView: View {
         }
         .sheet(isPresented: $showAbout) { AboutSheet() }
         .sheet(isPresented: $showSelf) { MemberSheet(member: store.selfMember) }
+        .sheet(isPresented: $showShare) {
+            if let u = shareURL {
+                ShareSheet(items: [u])
+            }
+        }
         .sheet(isPresented: $showService) {
             ServiceSheet {
                 // 改完地址/分享码，已连家庭的话立刻重连一次，不用等 45 秒轮询
@@ -477,6 +485,93 @@ struct MeView: View {
         }
     }
 
+    // MARK: 数据
+
+    /// 免费签名 7 天到期就装不上新包，换手机也要重来 —— 一定要能导出。
+    /// CSV 带 BOM，Excel / 数字都能直接正确识别中文。
+    private var dataCard: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            cardTitle("数据", icon: "externaldrive")
+
+            HStack {
+                Text("本机账目")
+                    .font(.system(size: 13.5))
+                    .foregroundStyle(Theme.ink)
+                Spacer()
+                Text("\(store.db.records.count) 笔 · \(store.books.count) 个账本")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Theme.ink3)
+            }
+
+            Rectangle().fill(Theme.line).frame(height: 0.7)
+
+            Button {
+                if let u = makeCSV() {
+                    shareURL = u
+                    showShare = true
+                }
+            } label: {
+                HStack {
+                    Text("导出 CSV")
+                        .font(.system(size: 13.5, weight: .medium))
+                        .foregroundStyle(Theme.ink)
+                    Spacer()
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.brand)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Text("导出的文件可以发给自己、存网盘，用 Excel 或「数字」打开。重装 App 之前建议先导一份。")
+                .font(.system(size: 11.5))
+                .foregroundStyle(Theme.ink3)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .cardStyle()
+    }
+
+    private func makeCSV() -> URL? {
+        var bookNames: [String: String] = [:]
+        for b in store.db.books { bookNames[b.id] = b.name }
+
+        var lines = ["日期,时间,类型,分类,金额,支付方式,成员,账本,备注"]
+        for r in store.db.records.sorted(by: { $0.ts < $1.ts }) {
+            let d = Date(timeIntervalSince1970: r.ts / 1000)
+            let row = [
+                Fmt.key(d),
+                Fmt.hm(r.ts),
+                r.isIncome ? "收入" : "支出",
+                r.category,
+                Money.plain(r.amount),
+                r.method,
+                store.memberName(r.member),
+                bookNames[r.book] ?? bookNames[LedgerBook.defaultId] ?? "",
+                r.note
+            ].map { csvField($0) }.joined(separator: ",")
+            lines.append(row)
+        }
+
+        let csv = "\u{FEFF}" + lines.joined(separator: "\r\n")
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("家庭记账-\(Fmt.key(Date())).csv")
+        do {
+            try csv.write(to: url, atomically: true, encoding: .utf8)
+            return url
+        } catch {
+            err = "导出失败：\(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    private func csvField(_ s: String) -> String {
+        if s.contains(",") || s.contains("\"") || s.contains("\n") {
+            return "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+        }
+        return s
+    }
+
     // MARK: 工具
 
     private func run(_ work: @escaping () async throws -> String) {
@@ -829,4 +924,18 @@ struct AboutSheet: View {
         let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
         return "\(v) (\(b))"
     }
+}
+
+// MARK: - 系统分享
+
+/// 导出 CSV 之后走系统的分享面板：AirDrop / 微信 / 存文件 / 邮件都行，
+/// 比自己拼一个导出页省事，也不用申请额外权限。
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }

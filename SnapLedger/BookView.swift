@@ -85,6 +85,7 @@ struct BookView: View {
                                  balance: totals.income - totals.expense,
                                  footValue: "\(store.count(from: range.start, to: range.end))")
                             .padding(.horizontal, 16)
+                            .id("top")
 
                         if scopeIndex == 1 {
                             MonthHeatCalendar(anchor: anchor, selectedKey: $heatPick) { d in
@@ -101,6 +102,10 @@ struct BookView: View {
                 // 只给翻页留动画。scopeIndex 的动画交给页头的 ScopeBar 自己，
                 // 两处同时上动画会和 LazyVStack 的增删打架。
                 .animation(.easeOut(duration: 0.22), value: anchor)
+                // 切粒度后回到顶部：不然停在上面一屏的滚动位置，看起来像「点了没反应」
+                .onChange(of: scopeIndex) { _, _ in
+                    proxy.scrollTo("top", anchor: .top)
+                }
             }
         }
         .background(Theme.bg)

@@ -88,6 +88,9 @@ struct StatView: View {
                     directionSwitch
                         .padding(.horizontal, 16)
 
+                    compareRow
+                        .padding(.horizontal, 16)
+
                     tiles
                         .padding(.horizontal, 16)
 
@@ -188,6 +191,57 @@ struct StatView: View {
                 tile(title: "日均", value: Money.currency(focusTotal / days))
             }
             tile(title: "最大一笔", value: maxSingle > 0 ? Money.currency(maxSingle) : "—")
+        }
+    }
+
+    // MARK: 与上一期对比
+
+    private var prevRange: (start: Date, end: Date) {
+        let cal = Fmt.cal
+        let comp: Calendar.Component = scopeIndex == 0 ? .day : (scopeIndex == 1 ? .month : .year)
+        let s = cal.date(byAdding: comp, value: -1, to: range.start) ?? range.start
+        return (s, range.start)
+    }
+
+    /// 「这个月比上个月多花了 12%」比单看一个总数有用得多
+    @ViewBuilder
+    private var compareRow: some View {
+        let prev = showIncome ? store.totals(from: prevRange.start, to: prevRange.end).income
+                              : store.totals(from: prevRange.start, to: prevRange.end).expense
+        if prev > 0 {
+            let diff = focusTotal - prev
+            let pct = diff / prev * 100
+            let up = diff > 0
+            HStack(spacing: 6) {
+                Image(systemName: up ? "arrow.up.right" : "arrow.down.right")
+                    .font(.system(size: 10, weight: .bold))
+                Text(up ? "比上一期多" : "比上一期少")
+                    .font(.system(size: 12))
+                Text(Money.currency(abs(diff)))
+                    .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                Text(String(format: "(%+.0f%%)", pct))
+                    .font(.system(size: 11.5, design: .rounded))
+                    .monospacedDigit()
+                Spacer(minLength: 0)
+                Text(prevLabel)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Theme.ink3)
+            }
+            // 支出涨了用红、降了用绿；收入反过来
+            .foregroundStyle((up != showIncome) ? Theme.expense : Theme.income)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(((up != showIncome) ? Theme.expense : Theme.income).opacity(0.08),
+                        in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+    }
+
+    private var prevLabel: String {
+        switch scopeIndex {
+        case 0: return "对比前一天"
+        case 1: return "对比上月"
+        default: return "对比去年"
         }
     }
 
