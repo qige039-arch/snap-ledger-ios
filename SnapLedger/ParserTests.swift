@@ -161,3 +161,115 @@ final class ParserTests: XCTestCase {
         XCTAssertEqual(comps.day, 28)
     }
 }
+
+// MARK: - 表格导入
+
+/// 导入的坑和截图识别不同：这里错的是「列找错了」，症状是金额差十倍或者日期全变成今天。
+/// 每一条都拿真实表格会出现的形态写。
+final class ImportTests: XCTestCase {
+
+    func testCSVWithHeader() {
+        let csv = """
+        日期,金额,分类,备注
+        2026-10-01,32.5,餐饮,午饭
+        2026-10-02,128,购物,超市
+        """
+        let out = TableImporter.parse(csv, existing: [])
+        XCTAssertNil(out.error)
+        XCTAssertEqual(out.rows.count, 2)
+        XCTAssertEqual(out.rows[0].amount, 32.5, accuracy: 0.001)
+        XCTAssertEqual(out.rows[0].category, "餐饮")
+        XCTAssertEqual(out.rows[0].note, "午饭")
+        XCTAssertFalse(out.rows[0].isIncome)
+        XCTAssertEqual(out.rows[1].amount, 128, accuracy: 0.001)
+    }
+
+    func testColumnOrderDoesNotMatter() {
+        let csv = """
+        金额,日期,分类
+        88.8,2026-09-30,交通
+        """
+        let out = TableImporter.parse(csv, existing: [])
+        XCTAssertNil(out.error)
+        XCTAssertEqual(out.rows.count, 1)
+        XCTAssertEqual(out.rows[0].amount, 88.8, accuracy: 0.001)
+        XCTAssertEqual(out.rows[0].category, "交通")
+    }
+
+    func testTabSeparatedPaste() {
+        // 从 Excel 复制单元格，粘出来就是制表符分隔
+        let tsv = "日期\t金额\t分类\n2026-10-03\t15\t日用"
+        let out = TableImporter.parse(tsv, existing: [])
+        XCTAssertEqual(out.rows.count, 1)
+        XCTAssertEqual(out.rows[0].amount, 15, accuracy: 0.001)
+    }
+
+    func testNoHeaderFallsBackToContent() {
+        let csv = """
+        2026-10-01,32.5
+        2026-10-02,128
+        """
+        let out = TableImporter.parse(csv, existing: [])
+        XCTAssertNil(out.error)
+        XCTAssertEqual(out.rows.count, 2)
+        XCTAssertEqual(out.rows[0].amount, 32.5, accuracy: 0.001)
+    }
+
+    func testIncomeColumn() {
+        let csv = """
+        日期,金额,收/支,分类
+        2026-10-05,8000,收入,工资
+        2026-10-06,30,支出,餐饮
+        """
+        let out = TableImporter.parse(csv, existing: [])
+        XCTAssertEqual(out.rows.count, 2)
+        XCTAssertTrue(out.rows[0].isIncome)
+        XCTAssertEqual(out.rows[0].category, "工资")
+        XCTAssertFalse(out.rows[1].isIncome)
+    }
+
+    func testCurrencySymbolsAndCommas() {
+        let csv = """
+        日期,金额
+        2026-10-01,"¥1,234.56"
+        """
+        let out = TableImporter.parse(csv, existing: [])
+        XCTAssertEqual(out.rows.count, 1)
+        XCTAssertEqual(out.rows[0].amount, 1234.56, accuracy: 0.001)
+    }
+
+    func testDuplicateIsSkipped() {
+        let csv = """
+        日期,金额
+        2026-10-01,32.5
+        """
+        let first = TableImporter.parse(csv, existing: [])
+        let key = "\(Int(first.rows[0].ts))|\(first.rows[0].amount)"
+        let second = TableImporter.parse(csv, existing: [key])
+        XCTAssertEqual(second.rows.count, 0)
+        XCTAssertEqual(second.duplicate, 1)
+    }
+
+    func testExcelSerialDate() {
+        // Excel 把日期存成数字时是「1900 起的天数」
+        XCTAssertNotNil(TableImporter.parseDate("45000"))
+        if let ms = TableImporter.parseDate("45000") {
+            let y = Calendar.current.component(.year, from: Date(timeIntervalSince1970: ms / 1000))
+            XCTAssertEqual(y, 2023)
+        }
+    }
+
+    func testGarbageIsNotADate() {
+        XCTAssertNil(TableImporter.parseDate("abc"))
+        XCTAssertNil(TableImporter.parseDate("12.5"))
+        XCTAssertNil(TableImporter.parseDate(""))
+    }
+
+    func testCleanAmount() {
+        XCTAssertEqual(RecordEditor.cleanAmount("¥ 1,234.56"), "1234.56")
+        XCTAssertEqual(RecordEditor.cleanAmount("１２．５"), "12.5")
+        XCTAssertEqual(RecordEditor.cleanAmount("32.567"), "32.56")
+        XCTAssertEqual(RecordEditor.cleanAmount("abc"), "")
+        XCTAssertEqual(RecordEditor.cleanAmount(""), "")
+    }
+}
