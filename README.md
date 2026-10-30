@@ -7,13 +7,13 @@ PWA 版的「原生重做」。目标只有一个：**自己家两台 iPhone 用
 
 ---
 
-## 当前状态（2026-10-28 晚）
+## 当前状态（2026-10-30 晚 / v0.6）
 
 | 项 | 状态 |
 |---|---|
-| 云端编译（GitHub macOS runner） | ✅ 通过，`run 40690869384`（UI 重做版） |
-| 25 条解析回归用例 | ✅ 全绿（4 个 test 方法遍历 25 条用例，0 失败） |
-| 未签名 ipa | ✅ 已产出，403 KB，在 `dist/SnapLedger-unsigned.ipa` |
+| 云端编译（GitHub macOS runner） | ✅ 通过，`run 41059542010`（AI 自动记账引导版） |
+| 解析 + 导入回归用例 | ✅ 全绿（36 条，0 失败） |
+| 未签名 ipa | ✅ 已产出，740 KB，在 `dist/SnapLedger-unsigned.ipa` |
 | App Intents 是否真进包 | ✅ ipa 里有 `Metadata.appintents/`，说明快捷指令动作会被系统识别 |
 | App 图标 | ✅ 已生成，`AppIcon60x60@2x.png` 在包里 |
 | **真机安装** | ⬜ 待你在 Windows 上跑 Sideloadly |
@@ -28,10 +28,30 @@ PWA 版的「原生重做」。目标只有一个：**自己家两台 iPhone 用
 | 记账 | 本月渐变汇总卡（支出大字 + 收入/结余/笔数）+ 聊天流 + 待确认卡片 + 输入栏 |
 | 账本 | 日/月/年三粒度、左右翻页、分组列表；**点任意一条可直接改金额/分类/方向，或删掉**；年视图带月度占比条，点月份跳到该月 |
 | 统计 | 支出/收入切换、总计·日均·最大一笔、Swift Charts 柱状趋势（月→每天，年→12 个月）、分类排行带百分比 |
-| 我的 | 渐变身份卡、邀请码大字 + 一键复制、同步状态、相册权限告警（仅选中的照片会提示去设置）、关于页 |
+| 我的 | 渐变身份卡、邀请码大字 + 一键复制、同步状态、**AI 自动记账四步引导**、相册权限告警、数据导出/导入、关于页 |
 
 设计系统在 `DesignSystem.swift`：动态色（浅色/深色两套）、卡片、自绘分段控件、分类配色、
 金额统一 rounded + 等宽数字（滚动不抖）。
+
+### AI 自动记账（v0.6，抄百事 AA 记账）
+
+百事那条快捷指令只有三个动作：**截屏 → 文本「v2」 → 将截屏和文本发送到 App 的 Intent**。
+它的引导页是四张编号卡：获取快捷指令 / 设置触发方式 / 开始使用 / 记账设置。
+
+这两样都照做了，但落地方式按我们自己的限制改了两处：
+
+| | 百事 AA | 这里 |
+|---|---|---|
+| 快捷指令分发 | 官方签名的 iCloud 链接，点一下就装 | 侧载签名，没法签名 `.shortcut`。给两条路：①「添加到快捷指令」（`ShortcutsLink`，系统原生，零签名）②随包分发的 `.shortcut` 文件，导入时需先开「允许不受信任的快捷指令」 |
+| Intent 参数 | 截图 + 文本「v2」 | 截图 + 「标记或备注」，`v2` 这类版本标记会被忽略，其它文字写成备注 |
+| 识别后 | 直接记账 | 先出待确认卡片，点一下才入账（认错要能改） |
+| 记账设置 | 选择账本、图片自动存档 | 同样两项，外加存档大小显示与一键清空 |
+
+`ScanSettings`（`ScanGuide.swift`）里的两个开关存 UserDefaults，**不进 LedgerDB**：
+它们是「这台手机怎么工作」的偏好，不该跟着 LWW 同步到另一台上。
+存档写 `Documents/scan-archive/`，长边压到 1200、JPEG 0.72，只进沙盒不进相册。
+
+---
 
 ### 曾经修掉的编译错误（记在这里，避免你以为是别的问题）
 
@@ -73,10 +93,17 @@ SnapLedger/
   Parser.swift           ★ 解析引擎，从 ocr.js 1:1 移植（约 600 行）
   SyncEngine.swift       ★ 同步客户端，从 sync.js 移植（LWW + 墓碑 + 水位线 + 自愈）
   VisionOCR.swift        Vision 中文识别 + 截屏感知（相册增量检测）
-  RecordIntent.swift     App Intents：记一笔 / 从图片记账
+  RecordIntent.swift     App Intents：记一笔 / 截图记账（两个参数，对齐百事那条快捷指令）
+  ScanGuide.swift        ★ AI 自动记账引导页（四步）+ 记账设置 + 截图存档
+  ImportSheet.swift      CSV / 粘贴表格导入（表头猜测 + Excel 序列号）
+  CalendarHeat.swift     月历热力图
   ChatView.swift         聊天流 + 待确认卡片 + 本月汇总
-  SettingsView.swift     家庭码、身份、相册权限
-  ParserTests.swift      25 条回归用例
+  BookView.swift         日 / 月 / 年三粒度账本 + 记录编辑
+  StatView.swift         统计：汇总网格 + 趋势图 + 分类分布
+  MeView.swift           身份、家庭账本、数据、服务设置、关于
+  DesignSystem.swift     颜色 / 卡片 / ScopeBar / StatCell / Fmt
+  ParserTests.swift      36 条回归用例
+  Resources/SnapScan.shortcut  随包分发的快捷指令文件
 ```
 
 ★ 这两个文件是资产，别重写。PWA 里那 39 条测试覆盖的就是它们。
