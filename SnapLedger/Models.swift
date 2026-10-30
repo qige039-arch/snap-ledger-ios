@@ -414,6 +414,25 @@ final class LedgerStore: ObservableObject {
         return r
     }
 
+    /// 批量导入（Excel / CSV）：几百条一起写，只 persist 一次
+    ///
+    /// 逐条调 add() 会每条都存一次盘、每次都给同步引擎打脏标记，
+    /// 几百条就能让界面卡住好几秒。
+    @discardableResult
+    func addBatch(_ list: [LedgerRecord]) -> Int {
+        guard !list.isEmpty else { return 0 }
+        let now = Date().timeIntervalSince1970 * 1000
+        for var r in list {
+            if r.member.isEmpty { r.member = selfMemberId }
+            if r.book.isEmpty { r.book = currentBookId }
+            r.at = now
+            db.records.append(r)
+        }
+        persist()
+        SyncEngine.shared.dirty()
+        return list.count
+    }
+
     func update(id: String,
                 amount: Double? = nil,
                 category: String? = nil,

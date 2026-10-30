@@ -11,19 +11,35 @@
 
 import SwiftUI
 
+/// 账本页只有一个呈现出口
+///
+/// ⚠️ 之前同一个 view 上挂了三个 `.sheet(...)`（改、加、账本），这在 SwiftUI 里
+/// 是有名的坑：多个 sheet 修饰符互相抢 presentation，表现就是「点了没任何反应」。
+/// 合并成一个 `.sheet(item:)` 之后这条路只有一条，行为确定。
+private enum BookRoute: Identifiable {
+    case add(Date?)
+    case edit(LedgerRecord)
+    case books
+
+    var id: String {
+        switch self {
+        case .add(let d): return "add-" + (d.map { Fmt.key($0) } ?? "now")
+        case .edit(let r): return "edit-" + r.id
+        case .books: return "books"
+        }
+    }
+}
+
 struct BookView: View {
     @ObservedObject private var store = LedgerStore.shared
 
     @State private var scopeIndex = 1          // 0 日 / 1 月 / 2 年
     @State private var anchor = Date()
-    @State private var editing: LedgerRecord?
-    @State private var showAdd = false
-    @State private var addDate: Date?          // 从空格子补账时带上的日期
+    @State private var route: BookRoute?
     @State private var heatPick: String?       // 日历上选中的那格
     @State private var missingDay: Date?       // 点了却没有任何记录的那天
     @State private var undoRecord: LedgerRecord?   // 刚删掉的，给 4 秒反悔期
     @State private var undoTimer: Task<Void, Never>?
-    @State private var showBooks = false
 
     private let scopeTitles = ["日", "月", "年"]
 
@@ -122,18 +138,31 @@ struct BookView: View {
             missingDay = nil
             anchor = Date()
         }
-        .sheet(item: $editing) { rec in
-            RecordEditor(record: rec)
+        .sheet(item: $route) { r in
+            switch r {
+            case .add(let d):
+                RecordEditor(record: nil, presetDate: d) { saved in
+                    // 补记到过去某天时，把页面翻到那一天 —— 否则保存完视野没变，
+                    // 看起来就像「点了保存什么都没发生」
+                    anchor = Date(timeIntervalSince1970: saved.ts / 1000)
+                    heatPick = Fmt.key(anchor)
+                    missingDay = nil
+                }
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
-        }
-        .sheet(isPresented: $showAdd, onDismiss: { addDate = nil }) {
-            RecordEditor(record: nil, presetDate: addDate)
+
+            case .edit(let rec):
+                RecordEditor(record: rec) { saved in
+                    anchor = Date(timeIntervalSince1970: saved.ts / 1000)
+                    heatPick = Fmt.key(anchor)
+                    missingDay = nil
+                }
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
-        }
-        .sheet(isPresented: $showBooks) {
-            BookSwitcherSheet()
+
+            case .books:
+                BookSwitcherSheet()
+            }
         }
     }
 
@@ -143,7 +172,7 @@ struct BookView: View {
         VStack(spacing: 9) {
             HStack(spacing: 8) {
                 Button {
-                    showBooks = true
+                    route = .books
                 } label: {
                     HStack(spacing: 5) {
                         Text(store.currentBook?.emoji ?? "🏠")
@@ -331,8 +360,7 @@ struct BookView: View {
             Spacer(minLength: 6)
 
             Button {
-                addDate = day
-                showAdd = true
+                route = .add(day)
             } label: {
                 Text("补一笔")
                     .font(.system(size: 12.5, weight: .semibold))
@@ -466,7 +494,7 @@ struct BookView: View {
                 ForEach(g.records) { r in
                     RecordLine(record: r,
                                memberName: store.memberName(r.member),
-                               onTap: { editing = r },
+                               onTap: { route = .edit(r) },
                                onDelete: { remove(r) })
                     if r.id != g.records.last?.id {
                         Rectangle().fill(Theme.line).frame(height: 0.7).padding(.leading, 64)
@@ -492,7 +520,7 @@ struct BookView: View {
                 .foregroundStyle(Theme.ink3)
                 .multilineTextAlignment(.center)
             Button {
-                showAdd = true
+                route = .add(nil)
             } label: {
                 Text("手动记一笔")
                     .font(.system(size: 13.5, weight: .semibold))
@@ -512,133 +540,171 @@ struct BookView: View {
 
 // MARK: - 一行记录
 
+/// 全局只允许一行处于「滑开」状态。几行同时露出删除按钮会让整个列表看起来是坏的。
+final class RowSwipeState: ObservableObject {
+    static let shared = RowSwipeState()
+    @Published var openId: String?
+}
+
 struct RecordLine: View {
     let record: LedgerRecord
     let memberName: String
     var onTap: (() -> Void)?
     var onDelete: (() -> Void)?
 
+    @ObservedObject private var rowState = RowSwipeState.shared
     @State private var dx: CGFloat = 0
-    private let actionWidth: CGFloat = 76
+    @State private var dragging = false
+
+    private let actionWidth: CGFloat = 72
 
     var body: some View {
         ZStack(alignment: .trailing) {
-            // 左滑露出来的删除按钮，垫在行下面
             if let del = onDelete {
-                Button {
-                    closeRow()
-                    del()
-                } label: {
-                    VStack(spacing: 3) {
-                        Image(systemName: "trash")
-                            .font(.system(size: 15, weight: .semibold))
-                        Text("删除")
-                            .font(.system(size: 11, weight: .medium))
-                    }
-                    .foregroundStyle(.white)
-                    .frame(width: actionWidth)
-                    .frame(maxHeight: .infinity)
-                    .background(Theme.expense)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
+                deleteButton(del)
             }
-
-            rowBody
+            rowContent
         }
         .clipped()
-    }
-
-    /// 只有可删的行才挂手势和长按菜单（别人的只读记录不挂，免得出现空菜单）
-    @ViewBuilder
-    private var rowBody: some View {
-        if let del = onDelete {
-            rowButton
-                .background(Theme.card)
-                .offset(x: dx)
-                .simultaneousGesture(swipe)
-                .contextMenu {
-                    if let tap = onTap {
-                        Button { tap() } label: { Label("修改这笔", systemImage: "pencil") }
-                    }
-                    Button(role: .destructive) { del() } label: {
-                        Label("删除这笔", systemImage: "trash")
-                    }
-                }
-        } else {
-            rowButton
+        .onChange(of: rowState.openId) { _, id in
+            if id != record.id, dx != 0 {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { dx = 0 }
+            }
+        }
+        .onDisappear {
+            if rowState.openId == record.id { rowState.openId = nil }
         }
     }
 
-    private var rowButton: some View {
-        Button {
-            closeRow()
-            onTap?()
-        } label: {
-            HStack(spacing: 12) {
-                EmojiBadge(emoji: record.emoji, tint: Tint.of(record.category))
+    /// 行本身不再用 Button
+    ///
+    /// 之前是 `Button + .simultaneousGesture(DragGesture)`，结果是「左滑删除时顺手
+    /// 打开编辑器」—— Button 的 tap 和拖动手势会同时被识别。换成 onTapGesture 后，
+    /// 拖动一旦超过 minimumDistance，tap 就自动失败，两者不会再同时成立。
+    private var rowContent: some View {
+        let core = rowInner
+            .background(Theme.card)
+            .offset(x: dx)
+            .contentShape(Rectangle())
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(record.title)
-                        .font(.system(size: 14.5, weight: .medium))
-                        .foregroundStyle(Theme.ink)
-                        .lineLimit(1)
+        return Group {
+            if onDelete == nil {
+                core.onTapGesture(perform: handleTap)
+            } else {
+                core
+                    .onTapGesture(perform: handleTap)
+                    .simultaneousGesture(swipe)
+            }
+        }
+    }
 
-                    HStack(spacing: 5) {
-                        Text(record.category)
-                        if !record.method.isEmpty {
-                            Text("·")
-                            Text(record.method)
-                        }
-                        Text("·")
-                        Text(record.member.isEmpty ? "我" : memberName)
-                        Text("·")
-                        Text(Fmt.hm(record.ts))
-                    }
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(Theme.ink3)
+    private var rowInner: some View {
+        HStack(spacing: 12) {
+            EmojiBadge(emoji: record.emoji, tint: Tint.of(record.category))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(record.title)
+                    .font(.system(size: 14.5, weight: .medium))
+                    .foregroundStyle(Theme.ink)
                     .lineLimit(1)
 
-                    if !record.note.isEmpty {
-                        Text(record.note)
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(Theme.ink3)
-                            .lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(record.category)
+                    if !record.method.isEmpty {
+                        Text("·")
+                        Text(record.method)
                     }
+                    Text("·")
+                    Text(record.member.isEmpty ? "我" : memberName)
+                    Text("·")
+                    Text(Fmt.hm(record.ts))
                 }
+                .font(.system(size: 11.5))
+                .foregroundStyle(Theme.ink3)
+                .lineLimit(1)
 
-                Spacer(minLength: 6)
-
-                Text((record.isIncome ? "+" : "-") + Money.currency(record.amount))
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(record.isIncome ? Theme.income : Theme.ink)
+                if !record.note.isEmpty {
+                    Text(record.note)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.ink3)
+                        .lineLimit(1)
+                }
             }
-            .padding(.vertical, 9)
+
+            Spacer(minLength: 6)
+
+            Text((record.isIncome ? "+" : "-") + Money.currency(record.amount))
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(record.isIncome ? Theme.income : Theme.ink)
+        }
+        .padding(.vertical, 9)
+        .contentShape(Rectangle())
+    }
+
+    /// 悬浮的圆角红块，不再是从卡片边缘切出来的一条直角色带
+    private func deleteButton(_ del: @escaping () -> Void) -> some View {
+        Button {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { dx = 0 }
+            rowState.openId = nil
+            del()
+        } label: {
+            VStack(spacing: 2) {
+                Image(systemName: "trash.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("删除")
+                    .font(.system(size: 10.5, weight: .medium))
+            }
+            .foregroundStyle(.white)
+            .frame(width: 60, height: 42)
+            .background(
+                LinearGradient(colors: [Theme.expense, Theme.expense.opacity(0.84)],
+                               startPoint: .top,
+                               endPoint: .bottom),
+                in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .padding(.trailing, 10)
     }
 
     /// 只接管水平方向，竖直方向留给 ScrollView，否则列表就划不动了
     private var swipe: some Gesture {
-        DragGesture(minimumDistance: 16)
+        DragGesture(minimumDistance: 14)
             .onChanged { g in
                 guard onDelete != nil else { return }
-                guard abs(g.translation.width) > abs(g.translation.height) * 1.3 else { return }
-                dx = min(0, max(-actionWidth, g.translation.width))
+                guard abs(g.translation.width) > abs(g.translation.height) * 1.2 else { return }
+                dragging = true
+                let base: CGFloat = (rowState.openId == record.id) ? -actionWidth : 0
+                dx = min(0, max(-actionWidth, base + g.translation.width))
             }
-            .onEnded { g in
-                guard onDelete != nil else { return }
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
-                    dx = (g.translation.width < -actionWidth * 0.4) ? -actionWidth : 0
+            .onEnded { _ in
+                guard onDelete != nil, dragging else {
+                    dragging = false
+                    return
+                }
+                let open = dx < -actionWidth * 0.5
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.9)) {
+                    dx = open ? -actionWidth : 0
+                }
+                rowState.openId = open ? record.id : nil
+                // 手指离开后 0.15 秒内不再响应点击，避免收尾那一下被当成 tap
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    dragging = false
                 }
             }
     }
 
-    private func closeRow() {
-        guard dx != 0 else { return }
-        withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { dx = 0 }
+    private func handleTap() {
+        guard !dragging else { return }
+        // 已经滑开时，点一下只是收起，不进编辑页
+        if rowState.openId == record.id {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { dx = 0 }
+            rowState.openId = nil
+            return
+        }
+        onTap?()
     }
 }
 
@@ -647,6 +713,7 @@ struct RecordLine: View {
 struct RecordEditor: View {
     let record: LedgerRecord?
     var presetDate: Date? = nil     // 从日历空格子补账时，把日期定在那天
+    var onSaved: ((LedgerRecord) -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var store = LedgerStore.shared
@@ -661,6 +728,7 @@ struct RecordEditor: View {
     @State private var date: Date = Date()
     @State private var showDeleteConfirm = false
     @State private var loaded = false
+    @State private var hint: String?
 
     private let cols = [GridItem(.adaptive(minimum: 74), spacing: 8)]
     private let methods = ["支付宝", "微信", "银行卡", "现金", "其他"]
@@ -703,12 +771,8 @@ struct RecordEditor: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }
                 }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("保存") { save() }
-                        .fontWeight(.semibold)
-                        .disabled(parsedAmount <= 0)
-                }
             }
+            .safeAreaInset(edge: .bottom, spacing: 0) { saveBar }
             .onAppear(perform: load)
             .confirmationDialog("删除这笔账？", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
                 Button("删除", role: .destructive) {
@@ -739,6 +803,18 @@ struct RecordEditor: View {
                     .foregroundStyle(Theme.ink)
                     .multilineTextAlignment(.center)
                     .frame(minWidth: 90)
+                    .onChange(of: amountText) { _, v in
+                        let c = Self.cleanAmount(v)
+                        if c != v { amountText = c }
+                        if !c.isEmpty { hint = nil }
+                    }
+            }
+
+            if let hint {
+                Text(hint)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.expense)
+                    .transition(.opacity)
             }
         }
         .frame(maxWidth: .infinity)
@@ -887,8 +963,57 @@ struct RecordEditor: View {
 
     // MARK: 存取
 
-    private var parsedAmount: Double {
-        Double(amountText.replacingOccurrences(of: ",", with: "")) ?? 0
+    private var parsedAmount: Double? {
+        guard let v = Double(amountText), v > 0, v.isFinite else { return nil }
+        return v
+    }
+
+    /// 全角转半角、只留数字和一个小数点、小数最多两位
+    ///
+    /// 从微信 / 支付宝复制金额时常带「¥」「,」「元」，甚至全角数字。
+    /// 以前直接 Double() 得到 nil 就把 `amountText` 当 0，保存按钮被 disabled 或
+    /// 静默 return —— 用户看到的就是「点了保存没反应」。现在先清洗再判断。
+    static func cleanAmount(_ s: String) -> String {
+        let half = s.applyingTransform(.fullwidthToHalfwidth, reverse: false) ?? s
+        var out = ""
+        var dot = false
+        for ch in half {
+            if ch >= "0", ch <= "9" {
+                out.append(ch)
+            } else if ch == ".", !dot {
+                dot = true
+                out.append(ch)
+            }
+        }
+        if let i = out.firstIndex(of: ".") {
+            let frac = out[out.index(after: i)...]
+            if frac.count > 2 {
+                out = String(out[..<out.index(i, offsetBy: 3)])
+            }
+        }
+        return out
+    }
+
+    /// 底部主按钮：不再是导航栏里那个「灰了就没提示」的保存
+    private var saveBar: some View {
+        VStack(spacing: 0) {
+            Rectangle().fill(Theme.line).frame(height: 0.6)
+
+            Button(action: save) {
+                Text(record == nil ? "保存这笔账" : "保存修改")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 48)
+                    .background(parsedAmount == nil ? Theme.ink3.opacity(0.38) : Theme.brand,
+                                in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .padding(.top, 9)
+            .padding(.bottom, 4)
+        }
+        .background(Theme.bg)
     }
 
     private func load() {
@@ -919,21 +1044,30 @@ struct RecordEditor: View {
     }
 
     private func save() {
-        let v = parsedAmount
-        guard v > 0 else { return }
+        guard let v = parsedAmount else {
+            // 绝不静默失败：告诉用户到底缺什么
+            withAnimation(.easeOut(duration: 0.16)) {
+                hint = amountText.isEmpty ? "先填一个金额" : "金额只认数字，比如 32.50"
+            }
+            return
+        }
         let type = isIncome ? "income" : "expense"
         let ts = date.timeIntervalSince1970 * 1000
+        var saved: LedgerRecord
+
         if let r = record {
             store.update(id: r.id, amount: v, category: category, emoji: emoji,
                          type: type, note: note, method: method, ts: ts, book: bookId)
+            saved = store.db.records.first { $0.id == r.id } ?? r
         } else {
             var rec = LedgerRecord(ts: ts, type: type, amount: v,
                                    category: category, emoji: emoji,
                                    method: method, note: note)
             rec.member = store.selfMemberId
             rec.book = bookId.isEmpty ? store.currentBookId : bookId
-            store.add(rec)
+            saved = store.add(rec)
         }
+        onSaved?(saved)
         dismiss()
     }
 }

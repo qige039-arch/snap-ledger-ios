@@ -8,6 +8,17 @@
 
 import SwiftUI
 
+/// 快捷指令「打开 URL → snapledger://scan」的落点
+///
+/// 用自增计数器而不是 Bool：连续两次扫码都要能触发，
+/// 而 Bool 置 true 之后第二次就不再变化了。
+final class ScanRelay: ObservableObject {
+    static let shared = ScanRelay()
+    @Published private(set) var pending = 0
+
+    func request() { pending += 1 }
+}
+
 struct RootView: View {
     @State private var tab = 0
 
@@ -30,5 +41,15 @@ struct RootView: View {
                 .tag(3)
         }
         .tint(Theme.brand)
+        .onOpenURL { url in
+            // 只认自己的 scheme，别家 App 的回调一律忽略
+            guard url.scheme?.lowercased() == "snapledger" else { return }
+            let host = (url.host ?? "").lowercased()
+            let path = url.path.lowercased()
+            if host == "scan" || path.contains("scan") {
+                tab = 0
+                ScanRelay.shared.request()
+            }
+        }
     }
 }

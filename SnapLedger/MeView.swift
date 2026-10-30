@@ -10,6 +10,24 @@ import SwiftUI
 import UIKit
 import Photos
 
+private enum MeRoute: Identifiable {
+    case about
+    case selfMember
+    case share
+    case service
+    case importData
+
+    var id: String {
+        switch self {
+        case .about: return "about"
+        case .selfMember: return "self"
+        case .share: return "share"
+        case .service: return "service"
+        case .importData: return "import"
+        }
+    }
+}
+
 struct MeView: View {
     @ObservedObject private var store = LedgerStore.shared
     @ObservedObject private var sync = SyncEngine.shared
@@ -18,10 +36,7 @@ struct MeView: View {
     @State private var busy = false
     @State private var err: String?
     @State private var photoStatus = "读取中…"
-    @State private var showAbout = false
-    @State private var showService = false
-    @State private var showSelf = false
-    @State private var showShare = false
+    @State private var route: MeRoute?
     @State private var shareURL: URL?
     @State private var showCodeCopied = false
 
@@ -61,17 +76,23 @@ struct MeView: View {
         } message: {
             Text(err ?? "")
         }
-        .sheet(isPresented: $showAbout) { AboutSheet() }
-        .sheet(isPresented: $showSelf) { MemberSheet(member: store.selfMember) }
-        .sheet(isPresented: $showShare) {
-            if let u = shareURL {
-                ShareSheet(items: [u])
-            }
-        }
-        .sheet(isPresented: $showService) {
-            ServiceSheet {
-                // 改完地址/分享码，已连家庭的话立刻重连一次，不用等 45 秒轮询
-                if store.db.sync?.isOn == true { sync.now() }
+        // 5 个 sheet 合并成一条路由。同一个 view 上挂多个 .sheet 时，
+        // SwiftUI 会争抢 presentation，症状就是「点了没反应」—— 账本页已经栽过一次。
+        .sheet(item: $route) { r in
+            switch r {
+            case .about:
+                AboutSheet()
+            case .selfMember:
+                MemberSheet(member: store.selfMember)
+            case .share:
+                if let u = shareURL { ShareSheet(items: [u]) }
+            case .service:
+                ServiceSheet {
+                    // 改完地址/分享码，已连家庭的话立刻重连一次，不用等 45 秒轮询
+                    if store.db.sync?.isOn == true { sync.now() }
+                }
+            case .importData:
+                ImportSheet()
             }
         }
     }
@@ -106,7 +127,7 @@ struct MeView: View {
                 Spacer()
             }
             .contentShape(Rectangle())
-            .onTapGesture { showSelf = true }
+            .onTapGesture { route = .selfMember }
 
             Rectangle().fill(.white.opacity(0.18)).frame(height: 0.8)
 
@@ -288,7 +309,7 @@ struct MeView: View {
             cardTitle("服务设置", icon: "antenna.radiowaves.left.and.right")
 
             Button {
-                showService = true
+                route = .service
             } label: {
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
@@ -407,7 +428,7 @@ struct MeView: View {
                     .contentShape(Rectangle())
                     .onTapGesture {
                         // 点自己 = 改资料，点对方 = 认领「这是我」
-                        if on { showSelf = true } else { sync.setSelfMember(m.id) }
+                        if on { route = .selfMember } else { sync.setSelfMember(m.id) }
                     }
                 }
                 Spacer(minLength: 0)
@@ -416,7 +437,7 @@ struct MeView: View {
             Rectangle().fill(Theme.line).frame(height: 0.7)
 
             Button {
-                showSelf = true
+                route = .selfMember
             } label: {
                 HStack {
                     Text("我的昵称与头像")
@@ -455,7 +476,7 @@ struct MeView: View {
     private var aboutCard: some View {
         VStack(spacing: 0) {
             Button {
-                showAbout = true
+                route = .about
             } label: {
                 HStack {
                     Label("关于与数据说明", systemImage: "info.circle")
@@ -508,7 +529,7 @@ struct MeView: View {
             Button {
                 if let u = makeCSV() {
                     shareURL = u
-                    showShare = true
+                    route = .share
                 }
             } label: {
                 HStack {
@@ -524,7 +545,28 @@ struct MeView: View {
             }
             .buttonStyle(.plain)
 
-            Text("导出的文件可以发给自己、存网盘，用 Excel 或「数字」打开。重装 App 之前建议先导一份。")
+            Rectangle().fill(Theme.line).frame(height: 0.7)
+
+            Button {
+                route = .importData
+            } label: {
+                HStack {
+                    Text("导入账单")
+                        .font(.system(size: 13.5, weight: .medium))
+                        .foregroundStyle(Theme.ink)
+                    Spacer()
+                    Text("CSV / 粘贴表格")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.ink3)
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.brand)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Text("导出的文件可以发给自己、存网盘，用 Excel 或「数字」打开。重装 App 之前建议先导一份。换手机或想把手写表格搬进来，走「导入账单」。")
                 .font(.system(size: 11.5))
                 .foregroundStyle(Theme.ink3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -854,6 +896,7 @@ struct ServiceSheet: View {
 
 struct AboutSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @State private var copied = false
 
     var body: some View {
         NavigationStack {
@@ -887,9 +930,42 @@ struct AboutSheet: View {
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("快捷指令怎么配")
+                        Text("快捷指令怎么配（两步）")
                             .font(.system(size: 14, weight: .semibold))
-                        Text("本 App 已把「记一笔」和「从图片记账」注册成快捷指令动作。去「快捷指令」新建一个：截取屏幕 → 从图片记账。然后绑定到 设置 → 辅助功能 → 触控 → 轻点背面 → 轻点两下。全程只需两个动作，不需要拼链接。")
+
+                        Text("1. 打开「快捷指令」，新建一个，添加动作「截取屏幕」")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Theme.ink2)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Text("2. 再添加动作「打开 URL」，地址填下面这串")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Theme.ink2)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Button {
+                            UIPasteboard.general.string = "snapledger://scan"
+                            copied = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { copied = false }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Text("snapledger://scan")
+                                    .font(.system(size: 12.5, design: .monospaced))
+                                    .foregroundStyle(Theme.brand)
+                                Spacer(minLength: 4)
+                                Text(copied ? "已复制" : "复制")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(copied ? Theme.income : Theme.ink3)
+                            }
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 9)
+                            .background(Theme.brandSoft,
+                                        in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        Text("然后到 设置 → 辅助功能 → 触控 → 轻点背面 → 轻点两下，选这个快捷指令。之后买完东西截个屏、双击背面，App 会自己打开并认那张截图。")
                             .font(.system(size: 13))
                             .foregroundStyle(Theme.ink2)
                             .fixedSize(horizontal: false, vertical: true)

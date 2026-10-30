@@ -33,19 +33,32 @@ enum ChatItem: Identifiable {
     }
 }
 
+private enum ChatRoute: Identifiable {
+    case all
+    case edit(LedgerRecord)
+
+    var id: String {
+        switch self {
+        case .all: return "all"
+        case .edit(let r): return "edit-" + r.id
+        }
+    }
+}
+
 @MainActor
 struct ChatView: View {
     @ObservedObject private var store = LedgerStore.shared
     @ObservedObject private var sync = SyncEngine.shared
     @StateObject private var watcher = ScreenshotWatcher.shared
+    @ObservedObject private var relay = ScanRelay.shared
 
     @State private var items: [ChatItem] = []
     @State private var input: String = ""
     @State private var toast: String?
-    @State private var showAllRecords = false
+    @State private var route: ChatRoute?
+    @State private var handledScan = 0
     @State private var showPhotoPicker = false
     @State private var pickerItem: PhotosPickerItem?
-    @State private var editing: LedgerRecord?
     @State private var undoRecord: LedgerRecord?
     @State private var undoTimer: Task<Void, Never>?
     @FocusState private var inputFocused: Bool
@@ -105,7 +118,14 @@ struct ChatView: View {
                 inputBar
             }
         }
-        .onAppear(perform: bootstrap)
+        .onAppear {
+            bootstrap()
+            consumeScanRequest()
+        }
+        // 快捷指令 / 桌面图标带 snapledger://scan 进来时，立刻去相册捞最新一张截图
+        .onChange(of: relay.pending) { _, _ in
+            consumeScanRequest()
+        }
         .onChange(of: watcher.incoming) { _, text in
             guard let t = text else { return }
             watcher.incoming = nil
@@ -122,19 +142,22 @@ struct ChatView: View {
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
-        .sheet(isPresented: $showAllRecords) {
-            AllRecordsSheet()
-        }
         .photosPicker(isPresented: $showPhotoPicker, selection: $pickerItem, matching: .images)
         .onChange(of: pickerItem) { _, item in
             guard let item else { return }
             pickerItem = nil
             Task { await readPickedPhoto(item) }
         }
-        .sheet(item: $editing) { rec in
-            RecordEditor(record: rec)
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
+        // 同样合并成一条路由，避免多个 .sheet 争抢 presentation
+        .sheet(item: $route) { r in
+            switch r {
+            case .all:
+                AllRecordsSheet()
+            case .edit(let rec):
+                RecordEditor(record: rec)
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
+            }
         }
     }
 
@@ -160,7 +183,7 @@ struct ChatView: View {
             Spacer(minLength: 8)
 
             Button {
-                showAllRecords = true
+                route = .all
             } label: {
                 Image(systemName: "list.bullet.rectangle")
                     .font(.system(size: 15, weight: .medium))
@@ -319,7 +342,7 @@ struct ChatView: View {
             if let r = store.db.records.first(where: { $0.id == rid }) {
                 RecordLine(record: r,
                            memberName: store.memberName(r.member),
-                           onTap: { editing = r },
+                           onTap: { route = .edit(r) },
                            onDelete: { remove(r) })
                     .padding(.horizontal, 12)
                     .cardStyle(padding: 0, radius: 14)
@@ -417,6 +440,15 @@ struct ChatView: View {
     }
 
     // MARK: 动作
+
+    /// 已经处理到第几次扫码请求。用计数比对，连续两次扫码都会各自触发一次。
+    private func consumeScanRequest() {
+        let n = relay.pending
+        guard n > handledScan else { return }
+        handledScan = n
+        inputFocused = false
+        Task { await watcher.pickUpNow() }
+    }
 
     private func bootstrap() {
         watcher.start()
