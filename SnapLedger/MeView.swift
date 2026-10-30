@@ -16,6 +16,7 @@ private enum MeRoute: Identifiable {
     case share
     case service
     case importData
+    case scanGuide
 
     var id: String {
         switch self {
@@ -24,6 +25,7 @@ private enum MeRoute: Identifiable {
         case .share: return "share"
         case .service: return "service"
         case .importData: return "import"
+        case .scanGuide: return "scan"
         }
     }
 }
@@ -59,7 +61,7 @@ struct MeView: View {
             VStack(spacing: 14) {
                 profileCard
                 familyCard
-                captureCard
+                scanCard
                 identityCard
                 dataCard
                 serviceCard
@@ -93,6 +95,8 @@ struct MeView: View {
                 }
             case .importData:
                 ImportSheet()
+            case .scanGuide:
+                ScanGuideView()
             }
         }
     }
@@ -342,11 +346,43 @@ struct MeView: View {
         .cardStyle()
     }
 
-    // MARK: 截图
+    // MARK: 截图 / AI 自动记账
 
-    private var captureCard: some View {
+    private var scanCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            cardTitle("截图识别", icon: "camera.viewfinder")
+            HStack(spacing: 6) {
+                cardTitle("AI 自动记账", icon: "wand.and.stars")
+                Spacer()
+                TagView(text: "推荐", color: Theme.brand)
+            }
+
+            Text("双击手机背面截个屏，账就记上了 —— 不用先打开 App，也不用输金额。")
+                .font(.system(size: 12.5))
+                .foregroundStyle(Theme.ink2)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button {
+                route = .scanGuide
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("去设置（3 步配好）")
+                        .font(.system(size: 13.5, weight: .semibold))
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.8))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 13)
+                .padding(.vertical, 11)
+                .background(Theme.hero, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Rectangle().fill(Theme.line).frame(height: 0.7)
 
             HStack {
                 Text("相册权限")
@@ -374,8 +410,6 @@ struct MeView: View {
                 }
                 .buttonStyle(.plain)
             }
-
-            Rectangle().fill(Theme.line).frame(height: 0.7)
 
             Button {
                 Task {
@@ -896,7 +930,6 @@ struct ServiceSheet: View {
 
 struct AboutSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var copied = false
 
     var body: some View {
         NavigationStack {
@@ -930,42 +963,9 @@ struct AboutSheet: View {
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("快捷指令怎么配（两步）")
+                        Text("快捷指令怎么配")
                             .font(.system(size: 14, weight: .semibold))
-
-                        Text("1. 打开「快捷指令」，新建一个，添加动作「截取屏幕」")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Theme.ink2)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                        Text("2. 再添加动作「打开 URL」，地址填下面这串")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Theme.ink2)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                        Button {
-                            UIPasteboard.general.string = "snapledger://scan"
-                            copied = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { copied = false }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Text("snapledger://scan")
-                                    .font(.system(size: 12.5, design: .monospaced))
-                                    .foregroundStyle(Theme.brand)
-                                Spacer(minLength: 4)
-                                Text(copied ? "已复制" : "复制")
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(copied ? Theme.income : Theme.ink3)
-                            }
-                            .padding(.horizontal, 11)
-                            .padding(.vertical, 9)
-                            .background(Theme.brandSoft,
-                                        in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-
-                        Text("然后到 设置 → 辅助功能 → 触控 → 轻点背面 → 轻点两下，选这个快捷指令。之后买完东西截个屏、双击背面，App 会自己打开并认那张截图。")
+                        Text("回到「我的」，点「AI 自动记账 → 去设置」，那里有四步图文，装快捷指令、绑轻点背面、选账本都在一页里，配完就能用。")
                             .font(.system(size: 13))
                             .foregroundStyle(Theme.ink2)
                             .fixedSize(horizontal: false, vertical: true)
