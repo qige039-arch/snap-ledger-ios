@@ -148,9 +148,8 @@ struct ScanGuideView: View {
     @State private var archiveCount = 0
     @State private var archiveBytes = 0
     @State private var phoneSteps = false
-    @State private var fallbackOpen = false
+    @State private var advancedOpen = false
     @State private var copied = false
-    @State private var fileURL: URL?
     @State private var toast: String?
 
     var body: some View {
@@ -164,39 +163,54 @@ struct ScanGuideView: View {
                         .foregroundStyle(Theme.brand)
                         .padding(.top, 4)
 
-                    stepCard(1, title: "获取快捷指令",
-                             text: "点下面的按钮，把「截图记账」装进快捷指令。第一次装如果提示「无法验证签名」，先到 设置 → 快捷指令 打开「允许不受信任的快捷指令」。") {
-                        VStack(spacing: 9) {
-                            primaryButton("安装快捷指令", icon: "arrow.down.circle.fill") {
-                                installShortcut()
-                            }
-
-                            // App 自己注册的系统动作：一键把「截图记账」加到快捷指令库里，
-                            // 不用签名、不用信任开关，比传文件稳。
+                    stepCard(1, title: "添加「截图记账」到快捷指令",
+                             text: "点下面的按钮，把本 App 的动作加进快捷指令。加完不用编辑 —— 它没有参数，双击背面直接跑，自己去相册找刚截的那张图。") {
+                        VStack(spacing: 10) {
                             ShortcutsLink()
                                 .shortcutsLinkStyle(.automatic)
 
-                            Text("上面是系统的一键添加，下面是这个 App 的招牌动作")
+                            Text("按钮点不动或者列表是空的？把 App 从后台划掉、重开一次再进来 —— 系统要重新索引一次动作。")
                                 .font(.system(size: 10.5))
                                 .foregroundStyle(Theme.ink3)
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
+
+                            Rectangle().fill(Theme.line).frame(height: 0.7)
 
                             Button {
-                                withAnimation { fallbackOpen.toggle() }
+                                openShortcutsApp()
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "arrow.up.forward.app")
+                                        .font(.system(size: 12.5))
+                                    Text("打开快捷指令 App，搜「家庭记账」")
+                                        .font(.system(size: 12.5, weight: .medium))
+                                    Spacer(minLength: 0)
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(Theme.ink3)
+                                }
+                                .foregroundStyle(Theme.brand)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                withAnimation { advancedOpen.toggle() }
                             } label: {
                                 HStack(spacing: 4) {
-                                    Text(fallbackOpen ? "收起手工配置" : "装不上？手工配只要两步")
-                                        .font(.system(size: 12, weight: .medium))
-                                        .foregroundStyle(Theme.brand)
-                                    Image(systemName: fallbackOpen ? "chevron.up" : "chevron.down")
+                                    Text(advancedOpen ? "收起进阶用法" : "进阶：从快捷指令里指定任意一张图")
+                                        .font(.system(size: 11.5, weight: .medium))
+                                        .foregroundStyle(Theme.ink3)
+                                    Image(systemName: advancedOpen ? "chevron.up" : "chevron.down")
                                         .font(.system(size: 9, weight: .bold))
-                                        .foregroundStyle(Theme.brand)
+                                        .foregroundStyle(Theme.ink3)
                                 }
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
-                            .padding(.top, 2)
 
-                            if fallbackOpen { fallbackSteps }
+                            if advancedOpen { advancedSteps }
                         }
                     }
 
@@ -235,14 +249,14 @@ struct ScanGuideView: View {
                         }
                     }
 
-                    stepCard(3, title: "开始使用",
-                             text: "在任何 App 里双击手机背面，系统会截图并发给本 App 识别。认出来的账会先出一张待确认卡片，看一眼金额点「确认记账」就行 —— 认错了也来得及改。") {
+                    stepCard(3, title: "先在这里授权相册",
+                             text: "这一步别跳过。后台记账要在相册里找截图，而系统不允许后台弹授权框 —— 只有你在本 App 里点过下面这个按钮、允许访问照片之后，双击背面才有用。") {
                         VStack(spacing: 8) {
                             Button {
                                 Task { await tryNow() }
                             } label: {
                                 HStack(spacing: 6) {
-                                    Image(systemName: "camera.viewfinder")
+                                    Image(systemName: "checkmark.shield")
                                         .font(.system(size: 12.5))
                                     Text("现在试一次（读最新一张截图）")
                                         .font(.system(size: 13, weight: .medium))
@@ -260,7 +274,13 @@ struct ScanGuideView: View {
                                     .font(.system(size: 11.5))
                                     .foregroundStyle(Theme.ink2)
                                     .frame(maxWidth: .infinity, alignment: .leading)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
+
+                            Text("点完它就会把最后一张截图认出来，并在聊天页出一张待确认卡片。认得出来，说明双击背面同样能成。")
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(Theme.ink3)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
 
@@ -299,10 +319,6 @@ struct ScanGuideView: View {
                         .padding(.bottom, 18)
                         .transition(.opacity)
                 }
-            }
-            .sheet(item: Binding(get: { fileURL.map(ShareFile.init) },
-                                 set: { if $0 == nil { fileURL = nil } })) { f in
-                ShareSheet(items: [f.url])
             }
         }
     }
@@ -399,15 +415,25 @@ struct ScanGuideView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: 手工配置兜底
+    // MARK: 进阶用法
 
-    private var fallbackSteps: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            stepLine("1", "新建快捷指令，添加动作「截取屏幕」")
-            stepLine("2", "再添加动作「打开 URL」，地址填下面这串")
-            copyRow("snapledger://scan")
-            Text("它会让 App 打开并自动读相册里最新那张截图，不用手动选图、也不用连线。")
+    private var advancedSteps: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            stepLine("1", "快捷指令里加「截屏」（或「选择照片」，挑相册里任意一张）")
+            stepLine("2", "再加本 App 的「认这张图」，把上一步的结果连到「截图」参数")
+            Text("适合想记某张旧账单、或者把别的 App 转发来的图也记上账的情况。日常双击背面用不着这一步。")
                 .font(.system(size: 11))
+                .foregroundStyle(Theme.ink3)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Rectangle().fill(Theme.line).frame(height: 0.7)
+
+            Text("老办法（仍然可用）：截屏 → 打开 URL → 下面这串")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.ink3)
+            copyRow("snapledger://scan")
+            Text("它会打开 App 并自动读最新截图。好处是两个动作配完就能跨手机照抄，坏处是会切到 App 前台。")
+                .font(.system(size: 10.5))
                 .foregroundStyle(Theme.ink3)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -569,23 +595,17 @@ struct ScanGuideView: View {
 
     // MARK: 动作
 
-    private func installShortcut() {
-        // bundle 里用 ASCII 文件名（SnapScan.shortcut）避开构建链上的编码坑，
-        // 拷出来再改成中文名，用户看到的还是「截图记账」。
-        guard let url = Bundle.main.url(forResource: "SnapScan", withExtension: "shortcut") else {
-            flash("这个包里没带快捷指令文件，用上面的「添加到快捷指令」")
-            return
-        }
-        // 先拷到临时目录并换个名字：直接分享 bundle 里的只读文件，
-        // 有些接收方（文件 App）会因为源路径不可写而失败。
-        let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("截图记账.shortcut")
-        try? FileManager.default.removeItem(at: tmp)
-        do {
-            try FileManager.default.copyItem(at: url, to: tmp)
-            fileURL = tmp
-        } catch {
-            flash("导出失败：\(error.localizedDescription)")
+    /// 直接跳快捷指令 App。
+    ///
+    /// 这里原本是「导出 .shortcut 文件 → 分享面板」。那条路是死的：
+    /// iOS 15 起快捷指令导入必须签名，未签名的 .shortcut 通过文件或分享打开
+    /// 一律提示「无法验证」，而当年那个「允许不受信任的快捷指令」开关也已经被系统移除。
+    /// 换句话说，用户点那个按钮注定失败，还找不到原因。
+    /// 现在只留系统原生那条路：App Shortcuts（ShortcutsLink / 在快捷指令里搜 App 名）。
+    private func openShortcutsApp() {
+        guard let url = URL(string: "shortcuts://") else { return }
+        UIApplication.shared.open(url) { ok in
+            if !ok { flash("没有找到「快捷指令」App，它可能被删掉了") }
         }
     }
 
@@ -619,10 +639,4 @@ struct ScanGuideView: View {
             withAnimation { toast = nil }
         }
     }
-}
-
-/// `.sheet(item:)` 需要一个 Identifiable，URL 本身不满足，包一层
-private struct ShareFile: Identifiable {
-    let url: URL
-    var id: String { url.absoluteString }
 }

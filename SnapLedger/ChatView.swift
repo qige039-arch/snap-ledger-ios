@@ -51,6 +51,7 @@ struct ChatView: View {
     @ObservedObject private var sync = SyncEngine.shared
     @StateObject private var watcher = ScreenshotWatcher.shared
     @ObservedObject private var relay = ScanRelay.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var items: [ChatItem] = []
     @State private var input: String = ""
@@ -121,10 +122,16 @@ struct ChatView: View {
         .onAppear {
             bootstrap()
             consumeScanRequest()
+            flushIntentReport()
         }
         // 快捷指令 / 桌面图标带 snapledger://scan 进来时，立刻去相册捞最新一张截图
         .onChange(of: relay.pending) { _, _ in
             consumeScanRequest()
+        }
+        // 双击背面是「后台」跑完的，dialog 根本弹不出来。回到前台补一句回执，
+        // 否则用户看到的就是「双击了，什么也没发生」。
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { flushIntentReport() }
         }
         .onChange(of: watcher.incoming) { _, text in
             guard let t = text else { return }
@@ -448,6 +455,23 @@ struct ChatView: View {
         handledScan = n
         inputFocused = false
         Task { await watcher.pickUpNow() }
+    }
+
+    /// 双击背面是后台跑完的，系统那个 dialog 不会弹出来。
+    /// 回到前台补一条回执，顺带把那笔账铺进聊天流 —— 能点开改、能左滑删，
+    /// 否则用户会以为「双击了，什么也没发生」。
+    private func flushIntentReport() {
+        guard let r = IntentReport.takeIfFresh() else { return }
+
+        if let rid = r.recordId,
+           store.db.records.contains(where: { $0.id == rid }),
+           !items.contains(where: { item in
+               if case .record(_, let existing) = item { return existing == rid }
+               return false
+           }) {
+            items.append(.record(id: "i\(rid)", recordId: rid))
+        }
+        items.append(.text(id: UUID().uuidString, mine: false, body: r.text))
     }
 
     private func bootstrap() {

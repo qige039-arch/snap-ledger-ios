@@ -21,6 +21,38 @@
 import AppIntents
 import UIKit
 import Foundation
+import Photos
+
+// MARK: - 后台记账结果的回执
+
+/// 快捷指令在后台跑完时，那个 dialog 根本不会弹出来 ——
+/// 「轻点背面」触发时用户还停在付款界面，屏幕上什么都不会发生，
+/// 用户就会以为「双击没反应」。
+///
+/// 所以后台记完必须留一张回执，等 App 回到前台再在聊天流里说一句。
+/// 存 UserDefaults 而不是内存单例：Intent 跑完 App 可能立刻被挂起，
+/// 内存里的东西不一定活到用户下次点开。
+enum IntentReport {
+    private static let key = "snap.intent.report"
+
+    static func write(_ text: String, recordId: String? = nil) {
+        var d: [String: Any] = ["text": text, "ts": Date().timeIntervalSince1970]
+        if let recordId { d["recordId"] = recordId }
+        UserDefaults.standard.set(d, forKey: key)
+    }
+
+    /// 取出 10 分钟内的回执，取走即清（同一句不会播两遍）。
+    /// 带 recordId 说明这笔账真记上了，聊天流里要把那一条也铺出来，能点开改。
+    static func takeIfFresh() -> (text: String, recordId: String?)? {
+        guard let d = UserDefaults.standard.dictionary(forKey: key),
+              let ts = d["ts"] as? Double,
+              Date().timeIntervalSince1970 - ts < 600,
+              let t = d["text"] as? String,
+              !t.isEmpty else { return nil }
+        UserDefaults.standard.removeObject(forKey: key)
+        return (t, d["recordId"] as? String)
+    }
+}
 
 // MARK: - 一句话记账
 
@@ -145,18 +177,124 @@ struct AddRecordFromImageIntent: AppIntent {
     }
 }
 
+// MARK: - 零参数版：自己去找最新截图
+//
+// 这个才是「双击背面」真正能用的那个动作。
+//
+// 为什么必须有它：`AddRecordFromImageIntent` 的 image 是必填参数，
+// 快捷指令里必须手动插一个「截屏」再把变量连到参数上 —— 用户加完动作
+// 一运行就弹「请选择截图」，体验直接断在这里。
+//
+// 这一版没有参数，App Shortcuts 加进去就能跑：自己去相册捞最近一张截图。
+// 拦路虎只有一个 —— 相册权限。后台 Intent 弹不出授权对话框，
+// 所以必须先让用户在本 App 里授权过一次（引导页第 3 步的「现在试一次」就是干这个的）。
+
+struct AddLatestScreenshotIntent: AppIntent {
+    static var title: LocalizedStringResource = "读最新截图记账"
+    static var description: IntentDescription = IntentDescription(
+        "从相册取最近一张截图，认出金额直接记进账本。不用在快捷指令里连线，双击手机背面就能用。")
+    static var openAppWhenRun: Bool = false
+
+    /// 和 ScreenshotWatcher 里自动识别用的是同一个 key，
+    /// 两边共用去重状态，不会出现「自动读过一次、双击又记一遍」。
+    private static let lastAssetKey = "snap.lastScreenshotAsset"
+
+    /// 只认 10 分钟内的截图。太宽会把上午的图捞出来记错账。
+    private static let window: TimeInterval = 600
+
+    init() {}
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let auth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard auth == .authorized || auth == .limited else {
+            let msg = "还没允许访问相册。打开家庭记账 → 我的 → AI 自动记账 → 点「现在试一次」，授权之后双击背面才有用。"
+            IntentReport.write(msg)
+            return .result(dialog: IntentDialog(stringLiteral: "先去 App 里允许访问相册"))
+        }
+
+        guard let asset = ScreenshotWatcher.latestScreenshot(within: Self.window) else {
+            let msg = "最近 10 分钟相册里没有新截图。买完东西先截个屏，再双击背面。"
+            IntentReport.write(msg)
+            return .result(dialog: IntentDialog(stringLiteral: "最近 10 分钟没有新截图"))
+        }
+
+        // 同一张只记一次。双击两次、或者手滑连点，不该出两笔账。
+        if UserDefaults.standard.string(forKey: Self.lastAssetKey) == asset.localIdentifier {
+            let msg = "这张截图刚才已经记过了，不会重复记。要记新的就先截个屏。"
+            IntentReport.write(msg)
+            return .result(dialog: IntentDialog(stringLiteral: "这张已经记过了"))
+        }
+
+        guard let ui = await ScreenshotWatcher.image(of: asset) else {
+            let msg = "截图读不出来（可能还在 iCloud 里没下载完），稍等几秒再双击背面。"
+            IntentReport.write(msg)
+            return .result(dialog: IntentDialog(stringLiteral: "截图读不出来"))
+        }
+
+        UserDefaults.standard.set(asset.localIdentifier, forKey: Self.lastAssetKey)
+
+        if ScanSettings.archiveImages {
+            ScanArchive.save(ui)
+        }
+
+        let text = await withCheckedContinuation { (cont: CheckedContinuation<String, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                cont.resume(returning: TextOCR.recognize(ui))
+            }
+        }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            let msg = "这张截图里没读到文字，可能不是账单页。换一张再试。"
+            IntentReport.write(msg)
+            return .result(dialog: IntentDialog(stringLiteral: "图里没读到文字"))
+        }
+
+        let bill = BillParser.analyze(text)
+        guard bill.amount > 0 else {
+            // 认不出金额时把这张图留着，用户回 App 能看是哪张
+            let msg = "截到了，但没认出金额（可能是余额页或不常见的版式）。回记账页手动补一句更快。"
+            IntentReport.write(msg)
+            return .result(dialog: IntentDialog(stringLiteral: "没认出金额"))
+        }
+
+        var rec = bill.toRecord(source: "intent")
+        rec.book = ScanSettings.resolvedBook()
+        let saved = LedgerStore.shared.add(rec)
+        SyncEngine.shared.now()
+
+        let sign = bill.isIncome ? "收入" : "支出"
+        let who = bill.merchant.isEmpty ? bill.category : bill.merchant
+        let book = LedgerStore.shared.db.books.first { $0.id == saved.book }?.name ?? "家庭账本"
+        let line = "双击背面记的：\(sign) \(Money.currency(bill.amount)) · \(who)，已进「\(book)」"
+        IntentReport.write(line, recordId: saved.id)
+        return .result(dialog: IntentDialog(stringLiteral: "记好了：\(sign) \(Money.currency(bill.amount)) · \(who)"))
+    }
+}
+
 // MARK: - 注册到快捷指令 / Siri
 
 struct SnapLedgerShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
+        // 排第一个 = 在快捷指令 App 的「家庭记账」分组里露在最上面。
+        // 零参数、双击背面直接能跑，这是主推动作。
         AppShortcut(
-            intent: AddRecordFromImageIntent(),
+            intent: AddLatestScreenshotIntent(),
             phrases: [
-                "用 \(.applicationName) 记这张截图",
-                "\(.applicationName) 截图记账"
+                "用 \(.applicationName) 记最新截图",
+                "\(.applicationName) 截图记账",
+                "\(.applicationName) 记一下"
             ],
             shortTitle: "截图记账",
             systemImageName: "camera.viewfinder"
+        )
+        AppShortcut(
+            intent: AddRecordFromImageIntent(),
+            phrases: [
+                "用 \(.applicationName) 记这张图",
+                "\(.applicationName) 认这张图"
+            ],
+            shortTitle: "认这张图",
+            systemImageName: "photo.badge.checkmark"
         )
         AppShortcut(
             intent: AddRecordIntent(),
