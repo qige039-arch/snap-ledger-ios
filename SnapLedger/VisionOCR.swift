@@ -88,6 +88,7 @@ final class ScreenshotWatcher: ObservableObject {
 
     private var observer: NSObjectProtocol?
     private var flashTask: Task<Void, Never>?
+    private var isPicking = false
     private let lastAssetKey = "snap.lastScreenshotAsset"
 
     func start() {
@@ -115,7 +116,21 @@ final class ScreenshotWatcher: ObservableObject {
         await pickUp(within: 7 * 24 * 3600, force: true)
     }
 
+    /// 双击背面进来时用：只认最近 10 分钟的截图。
+    ///
+    /// 这里不能学 `pickUpNow` 放到 7 天 —— 双击背面刚从付款页回来，
+    /// 用户期待的是「刚截的那张」。窗口放宽就会把三天前的图翻出来记成一笔。
+    func pickUpFromDoubleTap() async {
+        await pickUp(within: 600, force: true)
+    }
+
     private func pickUp(within seconds: TimeInterval, force: Bool = false) async {
+        // 冷启动时「双击背面的请求」和「打开 App 自动读」可能同时到，
+        // 两条都在跑就会弹两张一模一样的卡片。串行化，后来的直接放弃。
+        guard !isPicking else { return }
+        isPicking = true
+        defer { isPicking = false }
+
         let auth = await Self.ensurePhotoAccess()
         guard auth == .authorized || auth == .limited else {
             flash("没有相册权限。去 设置 → 家庭记账 → 照片 里改成「全部照片」")

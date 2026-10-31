@@ -105,7 +105,9 @@ struct AddRecordIntent: AppIntent {
 struct AddRecordFromImageIntent: AppIntent {
     static var title: LocalizedStringResource = "截图记账"
     static var description: IntentDescription = IntentDescription("识别截图里的金额和商户，直接记到家庭账本")
-    static var openAppWhenRun: Bool = false
+
+    /// 和零参数那个一致：记完要让用户看见，别在后台闷着
+    static var openAppWhenRun: Bool = true
 
     @Parameter(title: "截图", description: "选「截屏」的输出")
     var image: IntentFile
@@ -156,12 +158,15 @@ struct AddRecordFromImageIntent: AppIntent {
         rec.book = ScanSettings.resolvedBook()
         if let n = Self.meaningfulNote(note) { rec.note = n }
 
-        LedgerStore.shared.add(rec)
+        let saved = LedgerStore.shared.add(rec)
         SyncEngine.shared.now()
 
         let sign = bill.isIncome ? "收入" : "支出"
         let who = bill.merchant.isEmpty ? bill.category : bill.merchant
-        let book = LedgerStore.shared.db.books.first { $0.id == rec.book }?.name ?? "家庭账本"
+        let book = LedgerStore.shared.db.books.first { $0.id == saved.book }?.name ?? "家庭账本"
+        // 弹窗之外再留一笔回执：App 如果被系统直接拉到前台，聊天流里也要有这一条
+        IntentReport.write("快捷指令记的：\(sign) \(Money.currency(bill.amount)) · \(who)，已进「\(book)」",
+                           recordId: saved.id)
         return .result(dialog: IntentDialog(stringLiteral:
             "记好了：\(sign) \(Money.currency(bill.amount)) · \(who)（\(book)）"))
     }
@@ -177,7 +182,7 @@ struct AddRecordFromImageIntent: AppIntent {
     }
 }
 
-// MARK: - 零参数版：自己去找最新截图
+// MARK: - 零参数版：双击背面，打开 App 记这一笔
 //
 // 这个才是「双击背面」真正能用的那个动作。
 //
@@ -185,15 +190,29 @@ struct AddRecordFromImageIntent: AppIntent {
 // 快捷指令里必须手动插一个「截屏」再把变量连到参数上 —— 用户加完动作
 // 一运行就弹「请选择截图」，体验直接断在这里。
 //
-// 这一版没有参数，App Shortcuts 加进去就能跑：自己去相册捞最近一张截图。
-// 拦路虎只有一个 —— 相册权限。后台 Intent 弹不出授权对话框，
+// 这一版没有参数，App Shortcuts 加进去就能跑。
+//
+// ## 为什么 openAppWhenRun = true
+//
+// 上一版是后台跑的：用户双击背面，屏幕上什么都不会发生，账却已经记上了。
+// 用户的原话是「双击背面，直接就可以跳转到我的记账app，然后记录下这一笔」——
+// 他要的是看得见的过程：App 弹到前台，界面上说「正在读最新截图」，
+// 然后那张待确认卡片出现。
+//
+// 所以这个 Intent 自己不识别、不记账，只做一件事：留一张票据（ScanPending），
+// 然后让 App 前台的 ScreenshotWatcher 走完整的识别链路 ——
+// 用户能看到过程、能当场改分类、能撤销。后台静默记账做不到这些。
+//
+// 拦路虎只有一个 —— 相册权限。系统不允许后台弹授权框，
 // 所以必须先让用户在本 App 里授权过一次（引导页第 3 步的「现在试一次」就是干这个的）。
 
 struct AddLatestScreenshotIntent: AppIntent {
     static var title: LocalizedStringResource = "读最新截图记账"
     static var description: IntentDescription = IntentDescription(
-        "从相册取最近一张截图，认出金额直接记进账本。不用在快捷指令里连线，双击手机背面就能用。")
-    static var openAppWhenRun: Bool = false
+        "打开本 App，从相册取最近一张截图认出金额记进账本。不用在快捷指令里连线，双击手机背面就能用。")
+
+    /// 双击背面要跳到 App 里，用户才看得见账记到哪儿去了
+    static var openAppWhenRun: Bool = true
 
     /// 和 ScreenshotWatcher 里自动识别用的是同一个 key，
     /// 两边共用去重状态，不会出现「自动读过一次、双击又记一遍」。
@@ -206,68 +225,29 @@ struct AddLatestScreenshotIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
+        // 权限没给就别放行 —— 到了前台再报错，用户至少知道该去点哪
         let auth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard auth == .authorized || auth == .limited else {
-            let msg = "还没允许访问相册。打开家庭记账 → 我的 → AI 自动记账 → 点「现在试一次」，授权之后双击背面才有用。"
-            IntentReport.write(msg)
+            ScanPending.mark()
+            IntentReport.write("还没允许访问相册。点这边第 3 步的「现在试一次」，允许之后双击背面才有用。")
             return .result(dialog: IntentDialog(stringLiteral: "先去 App 里允许访问相册"))
         }
 
         guard let asset = ScreenshotWatcher.latestScreenshot(within: Self.window) else {
-            let msg = "最近 10 分钟相册里没有新截图。买完东西先截个屏，再双击背面。"
-            IntentReport.write(msg)
+            ScanPending.mark()
+            IntentReport.write("最近 10 分钟相册里没有新截图。买完东西先截个屏，再双击背面。")
             return .result(dialog: IntentDialog(stringLiteral: "最近 10 分钟没有新截图"))
         }
 
         // 同一张只记一次。双击两次、或者手滑连点，不该出两笔账。
         if UserDefaults.standard.string(forKey: Self.lastAssetKey) == asset.localIdentifier {
-            let msg = "这张截图刚才已经记过了，不会重复记。要记新的就先截个屏。"
-            IntentReport.write(msg)
+            IntentReport.write("这张截图刚才已经记过了，不会重复记。要记新的就先截个屏。")
             return .result(dialog: IntentDialog(stringLiteral: "这张已经记过了"))
         }
 
-        guard let ui = await ScreenshotWatcher.image(of: asset) else {
-            let msg = "截图读不出来（可能还在 iCloud 里没下载完），稍等几秒再双击背面。"
-            IntentReport.write(msg)
-            return .result(dialog: IntentDialog(stringLiteral: "截图读不出来"))
-        }
-
-        UserDefaults.standard.set(asset.localIdentifier, forKey: Self.lastAssetKey)
-
-        if ScanSettings.archiveImages {
-            ScanArchive.save(ui)
-        }
-
-        let text = await withCheckedContinuation { (cont: CheckedContinuation<String, Never>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                cont.resume(returning: TextOCR.recognize(ui))
-            }
-        }
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            let msg = "这张截图里没读到文字，可能不是账单页。换一张再试。"
-            IntentReport.write(msg)
-            return .result(dialog: IntentDialog(stringLiteral: "图里没读到文字"))
-        }
-
-        let bill = BillParser.analyze(text)
-        guard bill.amount > 0 else {
-            // 认不出金额时把这张图留着，用户回 App 能看是哪张
-            let msg = "截到了，但没认出金额（可能是余额页或不常见的版式）。回记账页手动补一句更快。"
-            IntentReport.write(msg)
-            return .result(dialog: IntentDialog(stringLiteral: "没认出金额"))
-        }
-
-        var rec = bill.toRecord(source: "intent")
-        rec.book = ScanSettings.resolvedBook()
-        let saved = LedgerStore.shared.add(rec)
-        SyncEngine.shared.now()
-
-        let sign = bill.isIncome ? "收入" : "支出"
-        let who = bill.merchant.isEmpty ? bill.category : bill.merchant
-        let book = LedgerStore.shared.db.books.first { $0.id == saved.book }?.name ?? "家庭账本"
-        let line = "双击背面记的：\(sign) \(Money.currency(bill.amount)) · \(who)，已进「\(book)」"
-        IntentReport.write(line, recordId: saved.id)
-        return .result(dialog: IntentDialog(stringLiteral: "记好了：\(sign) \(Money.currency(bill.amount)) · \(who)"))
+        // 真正的识别交给 App 前台做：用户看得见「正在读哪张图」，认错了当场能改
+        ScanPending.mark()
+        return .result(dialog: IntentDialog(stringLiteral: "正在读刚截的那张图…"))
     }
 }
 

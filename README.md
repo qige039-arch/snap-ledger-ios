@@ -7,11 +7,11 @@ PWA 版的「原生重做」。目标只有一个：**自己家两台 iPhone 用
 
 ---
 
-## 当前状态（2026-10-31 早 / v0.7）
+## 当前状态（2026-10-31 上午 / v0.8）
 
 | 项 | 状态 |
 |---|---|
-| 云端编译（GitHub macOS runner） | ✅ 通过，`run 41141854938`（双击背面可用版） |
+| 云端编译（GitHub macOS runner） | ✅ 通过，`run 41141854938`（v0.7）；v0.8 见下方 |
 | 解析 + 导入回归用例 | ✅ 全绿（36 条，0 失败） |
 | 未签名 ipa | ✅ 已产出，746 KB，在 `dist/SnapLedger-unsigned.ipa` |
 | App Intents 是否真进包 | ✅ ipa 里有 `Metadata.appintents/`，说明快捷指令动作会被系统识别 |
@@ -44,9 +44,36 @@ PWA 版的「原生重做」。目标只有一个：**自己家两台 iPhone 用
 |---|---|---|
 | 快捷指令分发 | 官方签名的 iCloud 链接，点一下就装 | **只能走 App Shortcuts**（`ShortcutsLink` 或到快捷指令里搜 App 名）。`.shortcut` 文件方案在 iOS 15 之后是死的 —— 导入必须签名，那个「允许不受信任的快捷指令」开关也被系统移除了 |
 | 动作参数 | 截图 + 文本「v2」，要先手动连一次线 | **零参数**：`AddLatestScreenshotIntent` 自己去相册捞最近 10 分钟的截图，加进快捷指令就能跑 |
+| 跑完的落点 | 停在原地，弹一个 toast | **`openAppWhenRun = true`：直接把 App 拉到前台，切到记账页，认完自动入账**（v0.8） |
 | 带参数版 | 就是上面那条 | 另留 `AddRecordFromImageIntent`（截图 + 标记/备注），给「想记某张旧图」的进阶用法 |
 | 后台反馈 | 记账成功后会通知 | 后台 dialog 弹不出来，所以写一条回执，App 回到前台时在聊天流里补一行 + 把那笔账铺出来（能点开改、左滑删） |
 | 记账设置 | 选择账本、图片自动存档 | 同样两项，外加存档大小显示与一键清空 |
+
+**v0.8 改成「看得见的记账」**
+
+v0.7 是后台跑完、回前台补回执。实测用户的感受还是「双击没反应」——
+`openAppWhenRun = false` 时屏幕上什么都不发生，账却已经记上了。
+
+现在的链路是：
+
+```
+双击背面
+  └→ AddLatestScreenshotIntent（openAppWhenRun = true，App 跳到前台）
+       ├ 相册没权限 / 10 分钟内没截图 → 写回执，界面上说清楚
+       └ 有截图 → ScanPending.mark()
+                    ├ UserDefaults 票据（跨进程）
+                    └ 同进程通知（App 先起、Intent 后跑，onAppear 会错过）
+                          └→ RootView 切到记账页 → ScanRelay.request()
+                               └→ ChatView 读最近 10 分钟的截图 → OCR → 直接入账
+                                    └→ 卡片原地变成记录行，可点开改、可左滑删
+```
+
+两个细节：
+
+- 双击这条路用 `pickUpFromDoubleTap()`（10 分钟窗口 + `force`），不能用 `pickUpNow()` 的 7 天窗口 ——
+  否则三天前的旧截图会被翻出来记成一笔。
+- `ScreenshotWatcher.pickUp` 加了 `isPicking` 串行锁。冷启动时「双击请求」和「打开 App 自动读」
+  会同时到，不锁就会弹两张一模一样的卡片。
 
 **v0.7 修掉的三个坑**（v0.6 装了但用不了，就是这个原因）：
 

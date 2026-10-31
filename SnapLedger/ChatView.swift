@@ -58,6 +58,8 @@ struct ChatView: View {
     @State private var toast: String?
     @State private var route: ChatRoute?
     @State private var handledScan = 0
+    /// 这一次扫码是不是「双击背面」来的。是的话认完直接入账，不必再点一次确认。
+    @State private var autoConfirmNext = false
     @State private var showPhotoPicker = false
     @State private var pickerItem: PhotosPickerItem?
     @State private var undoRecord: LedgerRecord?
@@ -128,15 +130,19 @@ struct ChatView: View {
         .onChange(of: relay.pending) { _, _ in
             consumeScanRequest()
         }
-        // 双击背面是「后台」跑完的，dialog 根本弹不出来。回到前台补一句回执，
-        // 否则用户看到的就是「双击了，什么也没发生」。
+        // 回前台时把快捷指令留下的回执补进聊天流：App 是被系统拉起来的，
+        // 光靠界面状态用户可能错过那一句。
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { flushIntentReport() }
         }
         .onChange(of: watcher.incoming) { _, text in
             guard let t = text else { return }
             watcher.incoming = nil
-            handleOCR(t)
+            // 双击背面进来这一趟要「记上」，不是「问一下」——
+            // 用户刚在付款页双击，回到 App 就该看到这笔已经在账上了。
+            let auto = autoConfirmNext
+            autoConfirmNext = false
+            handleOCR(t, autoConfirm: auto)
         }
         .overlay(alignment: .top) {
             if let t = toast {
@@ -454,12 +460,17 @@ struct ChatView: View {
         guard n > handledScan else { return }
         handledScan = n
         inputFocused = false
-        Task { await watcher.pickUpNow() }
+        autoConfirmNext = true
+        Task {
+            await watcher.pickUpFromDoubleTap()
+            // 没认出图（相册没新截图 / 读不到字）时 incoming 不会来，
+            // 「下次自动确认」的旗子必须在这里放倒，否则它会一直挂到下一次手动识别。
+            if watcher.incoming == nil { autoConfirmNext = false }
+        }
     }
 
-    /// 双击背面是后台跑完的，系统那个 dialog 不会弹出来。
-    /// 回到前台补一条回执，顺带把那笔账铺进聊天流 —— 能点开改、能左滑删，
-    /// 否则用户会以为「双击了，什么也没发生」。
+    /// 快捷指令（尤其是带图的「认这张图」）记完会留一张回执。
+    /// 回到前台把它补进聊天流，顺带把那笔账铺出来 —— 能点开改、能左滑删。
     private func flushIntentReport() {
         guard let r = IntentReport.takeIfFresh() else { return }
 
@@ -500,7 +511,12 @@ struct ChatView: View {
                               body: "付款截图后双击手机背面回来，我会自己找到那张图认出来。也可以点左下角相册按钮手动读。"))
         }
 
-        Task { await watcher.pickUpOnLaunch() }
+        // 双击背面进来的这一次，交给 consumeScanRequest 去读（它有 10 分钟窗口，
+        // 正是刚截的那张）。这里再开一条 2 分钟窗口的自动扫描只会打架。
+        let pendingScan = relay.pending > handledScan
+        if !pendingScan {
+            Task { await watcher.pickUpOnLaunch() }
+        }
     }
 
     /// 从相册手选一张图识别。选完立刻给反馈，绝不静默失败。
@@ -542,19 +558,25 @@ struct ChatView: View {
         items.append(.card(id: UUID().uuidString, bill: bill, savedId: nil))
     }
 
-    private func handleOCR(_ text: String) {
+    private func handleOCR(_ text: String, autoConfirm: Bool = false) {
         let bill = BillParser.analyze(text)
         if bill.amount <= 0 {
             items.append(.text(id: UUID().uuidString, mine: false,
                                body: "截图读到了，但没认出金额。可能是余额页或不常见的版式，手动说一句更快。"))
             return
         }
-        items.append(.card(id: UUID().uuidString, bill: bill, savedId: nil))
+        let id = UUID().uuidString
+        items.append(.card(id: id, bill: bill, savedId: nil))
+        guard autoConfirm else { return }
+        // 双击背面的落点：直接记上。卡片原地变成一条记录行，
+        // 想改点一下、想撤左滑 —— 不用再走一遍「确认记账」。
+        confirm(id: id, bill: bill, book: ScanSettings.resolvedBook())
     }
 
-    private func confirm(id: String, bill: ParsedBill) {
+    private func confirm(id: String, bill: ParsedBill, book: String? = nil) {
         var rec = bill.toRecord(source: bill.lines.count > 1 ? "ocr" : "chat")
         if rec.member.isEmpty { rec.member = store.selfMemberId }
+        if let book, !book.isEmpty { rec.book = book }
         let saved = store.add(rec)
         if let i = items.firstIndex(where: { $0.id == id }) {
             // 待确认卡片直接变成「已记账」的记录行：同一条数据，能左滑删、能点开改。

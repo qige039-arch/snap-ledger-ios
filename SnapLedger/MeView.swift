@@ -430,7 +430,7 @@ struct MeView: View {
             }
             .buttonStyle(.plain)
 
-            Text("双击背面打开本 App 时，会自动读最近 2 分钟内的截图并识别，图不出手机。")
+            Text("双击背面会跳到本 App，自动读刚截的那张图并记上，图不出手机。")
                 .font(.system(size: 11.5))
                 .foregroundStyle(Theme.ink3)
                 .fixedSize(horizontal: false, vertical: true)

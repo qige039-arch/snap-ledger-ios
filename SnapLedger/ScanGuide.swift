@@ -164,7 +164,7 @@ struct ScanGuideView: View {
                         .padding(.top, 4)
 
                     stepCard(1, title: "添加「截图记账」到快捷指令",
-                             text: "点下面的按钮，把本 App 的动作加进快捷指令。加完不用编辑 —— 它没有参数，双击背面直接跑，自己去相册找刚截的那张图。") {
+                             text: "点下面的按钮，把本 App 的动作加进快捷指令。加完不用编辑 —— 它没有参数，双击背面直接把 App 拉起来，自己去相册找刚截的那张图。") {
                         VStack(spacing: 10) {
                             ShortcutsLink()
                                 .shortcutsLinkStyle(.automatic)
@@ -215,7 +215,7 @@ struct ScanGuideView: View {
                     }
 
                     stepCard(2, title: "设置触发方式",
-                             text: "设置 → 辅助功能 → 触控 → 轻点背面 → 轻点两下，选「截图记账」。之后在任何界面双击手机背面，就会自动截屏并记上。") {
+                             text: "设置 → 辅助功能 → 触控 → 轻点背面 → 轻点两下，选「截图记账」。之后在任何界面双击手机背面，本 App 会自己弹到前台，把刚截的那张图认出来、记上。") {
                         VStack(spacing: 8) {
                             Button {
                                 withAnimation { phoneSteps.toggle() }
@@ -250,7 +250,7 @@ struct ScanGuideView: View {
                     }
 
                     stepCard(3, title: "先在这里授权相册",
-                             text: "这一步别跳过。后台记账要在相册里找截图，而系统不允许后台弹授权框 —— 只有你在本 App 里点过下面这个按钮、允许访问照片之后，双击背面才有用。") {
+                             text: "这一步别跳过。读截图要先允许访问照片，在这里点一次授权好，双击背面时就直接进入识别，不会先被系统弹窗拦住。") {
                         VStack(spacing: 8) {
                             Button {
                                 Task { await tryNow() }
@@ -277,7 +277,7 @@ struct ScanGuideView: View {
                                     .fixedSize(horizontal: false, vertical: true)
                             }
 
-                            Text("点完它就会把最后一张截图认出来，并在聊天页出一张待确认卡片。认得出来，说明双击背面同样能成。")
+                            Text("点完它会把最后一张截图认出来，并在聊天页出一张待确认卡片（手动点的不替你拍板）。认得出来，说明双击背面同样能成。")
                                 .font(.system(size: 10.5))
                                 .foregroundStyle(Theme.ink3)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -344,7 +344,7 @@ struct ScanGuideView: View {
                 Text("什么是 AI 自动记账？")
                     .font(.system(size: 17, weight: .bold))
                     .foregroundStyle(.white)
-                Text("截个屏，账就记上了。\n不用打开 App，不用输金额。")
+                Text("截个屏，双击手机背面，\nApp 自己弹出来把这一笔记上。")
                     .font(.system(size: 12))
                     .foregroundStyle(.white.opacity(0.85))
                     .fixedSize(horizontal: false, vertical: true)
