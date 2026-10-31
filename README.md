@@ -7,19 +7,43 @@ PWA 版的「原生重做」。目标只有一个：**自己家两台 iPhone 用
 
 ---
 
-## 当前状态（2026-10-31 晚 / v1.2）
+## 当前状态（2026-10-31 深夜 / v1.4）
 
 | 项 | 状态 |
 |---|---|
-| 云端编译（GitHub macOS runner） | ✅ 通过，`run 41200577372`（v1.2 存相册配方版） |
+| 云端编译（GitHub macOS runner） | ✅ 通过，`run 41211396932`（v1.4 直传主路线，包内版本 1.4 (15)） |
 | 解析 + 导入回归用例 | ✅ 全绿（36 条，0 失败） |
-| 未签名 ipa | ✅ 已产出，在 `dist/SnapLedger-unsigned.ipa` |
+| 未签名 ipa | ✅ 已产出，在 `dist/SnapLedger-unsigned.ipa`（798,241 B） |
 | App Intents 是否真进包 | ✅ ipa 里有 `Metadata.appintents/`，说明快捷指令动作会被系统识别 |
 | App 图标 | ✅ 已生成，`AppIcon60x60@2x.png` 在包里 |
 | **真机安装** | ⬜ 待你在 Windows 上跑 Sideloadly |
 | **UI / 相册 / 同步真机联调** | ⬜ 未做 |
 
-**v1.2 关键认知：快捷指令「截取屏幕」的图默认不进相册**
+**v1.4：主路线改成「截图直传」，相册完全不参与**
+
+用户明确表态：不想让记账截图堆进系统相册，期望「截完图 → 直接进 App 聊天框 →
+App 识别 → 自动记账」。所以 v1.2 的「存储到相册」四步配方被降级为备选：
+
+1. **主配方（三步）**：`截取屏幕 → 认这张图`（把「截取屏幕」的结果连到「截图」参数）。
+2. `ScanCoordinator.doScan` 顺序倒过来：**先取直传图、且不申请相册权限**；
+   取不到才 `ensurePhotoAccess` + 相册轮查。旧顺序会让「为了不污染相册而关掉照片权限」
+   的人即使图已递进来，也先被「没有相册权限」拦住。
+3. 聊天流里每笔截图账前面插一张缩略图（`ScanArchive.saveChatShot`）：
+   存 App 沙盒 `Documents/chat-shots/<recordId>.jpg`，长边 900、约 120KB，只留最近 60 张。
+   **不用相册原图引用** —— 直传图不在相册里，也不该要求长期相册权限。
+4. `noShotHint` 措辞改为先问「截图参数连上了吗」，再提相册。
+5. `AppShortcutsProvider` 顺序：`认这张图` 排第一。
+
+**踩坑（重要）：Info.plist 里写死的版本号**
+
+`project.yml` 的 `info.properties` 曾写死 `CFBundleShortVersionString: "1.2"` /
+`CFBundleVersion: "12"`，把上面的 `MARKETING_VERSION` 全覆盖了 —— v1.3、v1.4
+编出来的包在手机上、Sideloadly 里都还显示 1.2 (12)，根本分不清装的是哪一版。
+现在已改成 `$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)`。
+**以后发版只需要改上面两行 build settings。**
+侧载后在「我的 → 关于」能看到实际版本号。
+
+**v1.2 的旧结论（已被 v1.4 取代）：快捷指令「截取屏幕」的图默认不进相册**
 
 真机定位到这一轮的真正断点：双击背面本身不会截屏；就算快捷指令里加了「截取屏幕」，
 结果也只留在快捷指令变量里，**不写进相册** —— 而 App 找图只认相册，
