@@ -107,19 +107,10 @@ final class ScreenshotWatcher: ObservableObject {
     /// 窗口放到 7 天并强制跳过去重 —— 手动点就是要重读，
     /// 之前卡 10 分钟窗口 + 去重，导致「相册里最新截图是半小时前的」时点了完全没反应。
     ///
-    /// 注意：原来还有一个 `pickUpOnLaunch()`（打开 App 自动读最近 2 分钟），已删掉。
-    /// 它和「双击背面」会同时触发，两条查询互相抢，后到的那趟被丢掉就误报「没有截图」。
-    /// 现在只保留显式入口 —— 双击背面 / 自己点按钮，行为可预期。
+    /// 「双击背面」那条不走这里 —— 它由 `ScanCoordinator` 直接执行，不依赖任何视图。
+    /// 这里只服务两个自己点的入口：聊天页左下角菜单、以及系统截屏后的自动识别。
     func pickUpNow() async {
         await pickUp(within: 7 * 24 * 3600, force: true)
-    }
-
-    /// 双击背面进来时用。
-    ///
-    /// 窗口给 30 分钟：用户截完图可能先看了眼账单才双击，卡 10 分钟会冤枉人。
-    /// `force` 保持 false —— 同一张截图不该被两次双击记成两笔。
-    func pickUpFromDoubleTap() async {
-        await pickUp(within: 1800)
     }
 
     private func pickUp(within seconds: TimeInterval, force: Bool = false) async {
@@ -214,7 +205,7 @@ final class ScreenshotWatcher: ObservableObject {
     }
 
     /// Vision 同步跑 200-400ms，别卡主线程
-    private static func recognizeOffMain(_ image: UIImage) async -> String {
+    static func recognizeOffMain(_ image: UIImage) async -> String {
         await withCheckedContinuation { cont in
             DispatchQueue.global(qos: .userInitiated).async {
                 cont.resume(returning: TextOCR.recognize(image))

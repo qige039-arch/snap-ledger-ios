@@ -142,6 +142,7 @@ struct ScanGuideView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var store = LedgerStore.shared
     @ObservedObject private var watcher = ScreenshotWatcher.shared
+    @ObservedObject private var scanner = ScanCoordinator.shared
 
     @State private var bookId = ""
     @State private var archiveOn = ScanSettings.archiveImages
@@ -253,7 +254,7 @@ struct ScanGuideView: View {
                              text: "这一步别跳过。读截图要先允许访问照片，在这里点一次授权好，双击背面时就直接进入识别，不会先被系统弹窗拦住。") {
                         VStack(spacing: 8) {
                             Button {
-                                Task { await tryNow() }
+                                tryNow()
                             } label: {
                                 HStack(spacing: 6) {
                                     Image(systemName: "checkmark.shield")
@@ -269,15 +270,15 @@ struct ScanGuideView: View {
                             }
                             .buttonStyle(.plain)
 
-                            if !watcher.status.isEmpty {
-                                Text(watcher.status)
+                            if !scanner.banner.isEmpty || !watcher.status.isEmpty {
+                                Text(scanner.banner.isEmpty ? watcher.status : scanner.banner)
                                     .font(.system(size: 11.5))
                                     .foregroundStyle(Theme.ink2)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
 
-                            Text("点完它会把最后一张截图认出来，并在聊天页出一张待确认卡片（手动点的不替你拍板）。认得出来，说明双击背面同样能成。")
+                            Text("点完它会去相册取最新一张截图，认出来就直接记上（记错了到聊天页点开改、左滑删）。这一步能成，双击背面就一定能成。")
                                 .font(.system(size: 10.5))
                                 .foregroundStyle(Theme.ink3)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -622,9 +623,11 @@ struct ScanGuideView: View {
         }
     }
 
-    private func tryNow() async {
-        await watcher.pickUpNow()
-        if watcher.status.isEmpty { flash("认出来了，回记账页看卡片") }
+    /// 和双击背面走同一条路：找图 → 识别 → 入账，全部由 ScanCoordinator 负责。
+    /// 不用 `watcher.pickUpNow()`：那条路把结果交给聊天页，
+    /// 而现在用户站在「我的」页，聊天页未必挂载，结果就丢了。
+    private func tryNow() {
+        ScanCoordinator.shared.scanLatestManually()
     }
 
     private func refreshArchive() {

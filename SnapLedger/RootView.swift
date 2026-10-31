@@ -8,22 +8,11 @@
 
 import SwiftUI
 
-/// 快捷指令「打开 URL → snapledger://scan」的落点
-///
-/// 用自增计数器而不是 Bool：连续两次扫码都要能触发，
-/// 而 Bool 置 true 之后第二次就不再变化了。
-final class ScanRelay: ObservableObject {
-    static let shared = ScanRelay()
-    @Published private(set) var pending = 0
-
-    func request() { pending += 1 }
-}
-
 /// 「双击背面 → 打开 App → 记这一笔」的交接票据
 ///
-/// 为什么不能只用 `ScanRelay`：`openAppWhenRun = true` 的 Intent 有可能运行在
-/// 系统的独立进程里，那时它摸不到 App 内存里的单例。UserDefaults 是同一个沙盒，
-/// 两边都能读写，所以借它传话。
+/// 正常情况下用不上：`openAppWhenRun = true` 的 Intent 就在 App 进程里，
+/// 它直接调 `ScanCoordinator.shared`。票据是给「Intent 跑在独立进程」那种情况兜底的 ——
+/// 那时它摸不到 App 内存里的单例，而 UserDefaults 是同一个沙盒，两边都能读写。
 ///
 /// 打的是时间戳而不是 Bool：连着双击两次，第二张截图也要能记。
 enum ScanPending {
@@ -57,6 +46,7 @@ extension Notification.Name {
 
 struct RootView: View {
     @State private var tab = 0
+    @ObservedObject private var scanner = ScanCoordinator.shared
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -78,6 +68,32 @@ struct RootView: View {
                 .tag(3)
         }
         .tint(Theme.brand)
+        // 双击背面后把记账页翻出来 —— 这一步不能交给聊天页自己做，
+        // 它可能还没挂载（用户当时停在「我的」页）。
+        .onChange(of: scanner.focusChat) { _, _ in tab = 0 }
+        // 进度和结果浮在最上面，不管当前在哪个 tab 都看得见。
+        // 之前只在聊天页里显示，而用户双击完可能还停在别的页 —— 于是像「没反应」。
+        .overlay(alignment: .top) {
+            if !scanner.banner.isEmpty {
+                HStack(spacing: 7) {
+                    Image(systemName: scanner.banner.hasPrefix("已记账") ? "checkmark.circle.fill" : "sparkle")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(scanner.banner)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .background(Theme.ink.opacity(0.92), in: Capsule())
+                .padding(.horizontal, 24)
+                .padding(.top, 8)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+                .allowsHitTesting(false)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: scanner.banner)
         .onAppear { consumeScanPending() }
         // App 已经在后台时被双击背面拉起，RootView 不会重建，onAppear 不会再来一次，
         // 所以还得盯着 scenePhase。
@@ -95,15 +111,18 @@ struct RootView: View {
             let path = url.path.lowercased()
             if host == "scan" || path.contains("scan") {
                 tab = 0
-                ScanRelay.shared.request()
+                ScanCoordinator.shared.scanFromShortcut()
             }
         }
     }
 
-    /// 双击背面留下的票据：切到记账页，并让它马上去读那张截图
+    /// 双击背面留下的票据：切到记账页，并让它马上去读那张截图。
+    ///
+    /// 这一层是兜底。真正干活的是 `ScanCoordinator` —— Intent 在 App 进程内直接调它，
+    /// 不会再出现「票留下来了，但取票的钩子已经跑过去了」那种时差错位。
     private func consumeScanPending() {
         guard ScanPending.takeIfFresh() else { return }
         tab = 0
-        ScanRelay.shared.request()
+        ScanCoordinator.shared.scanFromShortcut()
     }
 }

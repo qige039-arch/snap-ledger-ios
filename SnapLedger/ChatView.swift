@@ -50,16 +50,13 @@ struct ChatView: View {
     @ObservedObject private var store = LedgerStore.shared
     @ObservedObject private var sync = SyncEngine.shared
     @StateObject private var watcher = ScreenshotWatcher.shared
-    @ObservedObject private var relay = ScanRelay.shared
+    @ObservedObject private var scanner = ScanCoordinator.shared
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var items: [ChatItem] = []
     @State private var input: String = ""
     @State private var toast: String?
     @State private var route: ChatRoute?
-    @State private var handledScan = 0
-    /// 这一次扫码是不是「双击背面」来的。是的话认完直接入账，不必再点一次确认。
-    @State private var autoConfirmNext = false
     @State private var showPhotoPicker = false
     @State private var pickerItem: PhotosPickerItem?
     @State private var undoRecord: LedgerRecord?
@@ -89,6 +86,8 @@ struct ChatView: View {
                             .padding(.horizontal, 16)
                             .padding(.top, 8)
 
+                        // 双击那条链路的进度由 RootView 的顶部浮层统一显示（任何 tab 都看得见），
+                        // 这里只管「手动读图 / 系统截屏」的进度。
                         if !watcher.status.isEmpty {
                             statusBubble(watcher.status)
                         }
@@ -123,12 +122,13 @@ struct ChatView: View {
         }
         .onAppear {
             bootstrap()
-            consumeScanRequest()
             flushIntentReport()
+            adoptScanResults()
         }
-        // 快捷指令 / 桌面图标带 snapledger://scan 进来时，立刻去相册捞最新一张截图
-        .onChange(of: relay.pending) { _, _ in
-            consumeScanRequest()
+        // 双击背面那趟由 ScanCoordinator 直接记进账本，这里只负责把结果铺出来。
+        // 不依赖「谁先谁后」：晚到也能补上，不会漏。
+        .onChange(of: scanner.pendingRecordIds) { _, _ in
+            adoptScanResults()
         }
         // 回前台时把快捷指令留下的回执补进聊天流：App 是被系统拉起来的，
         // 光靠界面状态用户可能错过那一句。
@@ -138,11 +138,9 @@ struct ChatView: View {
         .onChange(of: watcher.incoming) { _, text in
             guard let t = text else { return }
             watcher.incoming = nil
-            // 双击背面进来这一趟要「记上」，不是「问一下」——
-            // 用户刚在付款页双击，回到 App 就该看到这笔已经在账上了。
-            let auto = autoConfirmNext
-            autoConfirmNext = false
-            handleOCR(t, autoConfirm: auto)
+            // 这条路径是「手动读图 / 系统截屏」，出待确认卡片让用户拍板。
+            // 双击背面那条走 ScanCoordinator，记完直接把记录行铺出来。
+            handleOCR(t)
         }
         .overlay(alignment: .top) {
             if let t = toast {
@@ -454,18 +452,23 @@ struct ChatView: View {
 
     // MARK: 动作
 
-    /// 已经处理到第几次扫码请求。用计数比对，连续两次扫码都会各自触发一次。
-    private func consumeScanRequest() {
-        let n = relay.pending
-        guard n > handledScan else { return }
-        handledScan = n
-        inputFocused = false
-        autoConfirmNext = true
-        Task {
-            await watcher.pickUpFromDoubleTap()
-            // 没认出图（相册没新截图 / 读不到字）时 incoming 不会来，
-            // 「下次自动确认」的旗子必须在这里放倒，否则它会一直挂到下一次手动识别。
-            if watcher.incoming == nil { autoConfirmNext = false }
+    /// 把 ScanCoordinator 刚记下的那几笔铺进聊天流。
+    ///
+    /// 取走即清（drain），所以重复触发不会插两次；而且晚到也补得上 ——
+    /// App 冷启动时 ChatView 可能还没挂载，那时结果先攒在 coordinator 里，
+    /// onAppear 再取一遍就行。
+    private func adoptScanResults() {
+        let ids = scanner.drainPendingRecords()
+        guard !ids.isEmpty else { return }
+        for rid in ids {
+            guard store.db.records.contains(where: { $0.id == rid }) else { continue }
+            let exists = items.contains { item in
+                if case .record(_, let existing) = item { return existing == rid }
+                return false
+            }
+            if !exists {
+                items.append(.record(id: "s\(rid)", recordId: rid))
+            }
         }
     }
 
@@ -551,19 +554,14 @@ struct ChatView: View {
         items.append(.card(id: UUID().uuidString, bill: bill, savedId: nil))
     }
 
-    private func handleOCR(_ text: String, autoConfirm: Bool = false) {
+    private func handleOCR(_ text: String) {
         let bill = BillParser.analyze(text)
         if bill.amount <= 0 {
             items.append(.text(id: UUID().uuidString, mine: false,
                                body: "截图读到了，但没认出金额。可能是余额页或不常见的版式，手动说一句更快。"))
             return
         }
-        let id = UUID().uuidString
-        items.append(.card(id: id, bill: bill, savedId: nil))
-        guard autoConfirm else { return }
-        // 双击背面的落点：直接记上。卡片原地变成一条记录行，
-        // 想改点一下、想撤左滑 —— 不用再走一遍「确认记账」。
-        confirm(id: id, bill: bill, book: ScanSettings.resolvedBook())
+        items.append(.card(id: UUID().uuidString, bill: bill, savedId: nil))
     }
 
     private func confirm(id: String, bill: ParsedBill, book: String? = nil) {

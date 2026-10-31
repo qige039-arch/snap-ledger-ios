@@ -218,20 +218,24 @@ struct AddLatestScreenshotIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        // 这里只判一件事：权限有没有被关掉。
+        // 双保险：一条直接干，一条留票兜底。
         //
-        // 不要在 Intent 里预判「相册里有没有截图」—— v0.8 就栽在这：
-        // 双击背面那一刻，刚截的图往往还没写进相册、索引也还没更新，
-        // 在 App 起来之前判一次就等于提前判死刑，用户看到「最近 10 分钟没有截图」，
-        // 但他明明刚截完。找图、重试、认图全部交给前台的 ScreenshotWatcher。
+        // `openAppWhenRun = true` 的 Intent 就跑在 App 进程里，所以这里能直接摸到
+        // `ScanCoordinator` —— 读图、识别、入账全在它那儿，不经过任何视图。
+        // v0.9 把动作挂到 ChatView 的 onChange 上，App 冷启动时订阅还没注册，
+        // 于是「跳到 App 了、显示正在读、然后没有然后」。
+        //
+        // 票据（ScanPending）留给另一种可能：Intent 被系统放进独立进程执行 ——
+        // 那边摸不到单例，只有 UserDefaults 能穿过去。
+        ScanPending.mark()
+        ScanCoordinator.shared.scanFromShortcut()
+
         let auth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         if auth == .denied || auth == .restricted {
-            ScanPending.mark()
             IntentReport.write("相册权限被关掉了。到 iOS 设置 → 家庭记账 → 照片 → 改成「完全访问」，再双击背面。")
             return .result(dialog: IntentDialog(stringLiteral: "先去 iOS 设置里允许访问照片"))
         }
 
-        ScanPending.mark()
         return .result(dialog: IntentDialog(stringLiteral: "正在读刚截的那张图…"))
     }
 }

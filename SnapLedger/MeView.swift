@@ -33,6 +33,7 @@ private enum MeRoute: Identifiable {
 struct MeView: View {
     @ObservedObject private var store = LedgerStore.shared
     @ObservedObject private var sync = SyncEngine.shared
+    @ObservedObject private var scanner = ScanCoordinator.shared
     /// 点「立即读取最新一张截图」要有反馈，否则用户点了觉得没反应
     @ObservedObject private var watcher = ScreenshotWatcher.shared
 
@@ -428,8 +429,10 @@ struct MeView: View {
             }
 
             Button {
+                // 走 ScanCoordinator：它不依赖聊天页有没有挂载，识别的结果直接入账，
+                // 进度和原因也一并回传（这里和记账页同时能看到）。
+                ScanCoordinator.shared.scanLatestManually()
                 Task {
-                    await ScreenshotWatcher.shared.pickUpNow()
                     photoStatus = await statusText()
                     photoLatest = await latestText()
                 }
@@ -448,7 +451,13 @@ struct MeView: View {
             .buttonStyle(.plain)
 
             // 识别过程/失败原因要看得见，不然点了像没反应
-            if !watcher.status.isEmpty {
+            if !scanner.banner.isEmpty {
+                Text(scanner.banner)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else if !watcher.status.isEmpty {
                 Text(watcher.status)
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.ink2)

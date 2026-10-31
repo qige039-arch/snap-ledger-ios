@@ -7,11 +7,11 @@ PWA 版的「原生重做」。目标只有一个：**自己家两台 iPhone 用
 
 ---
 
-## 当前状态（2026-10-31 下午 / v0.9）
+## 当前状态（2026-10-31 晚 / v1.0）
 
 | 项 | 状态 |
 |---|---|
-| 云端编译（GitHub macOS runner） | ✅ 通过，`run 41184225852`（v0.9 找图修复版） |
+| 云端编译（GitHub macOS runner） | ✅ 通过，v0.9 见 `run 41184225852`；v1.0 见下方 |
 | 解析 + 导入回归用例 | ✅ 全绿（36 条，0 失败） |
 | 未签名 ipa | ✅ 已产出，752 KB，在 `dist/SnapLedger-unsigned.ipa` |
 | App Intents 是否真进包 | ✅ ipa 里有 `Metadata.appintents/`，说明快捷指令动作会被系统识别 |
@@ -48,6 +48,49 @@ PWA 版的「原生重做」。目标只有一个：**自己家两台 iPhone 用
 | 带参数版 | 就是上面那条 | 另留 `AddRecordFromImageIntent`（截图 + 标记/备注），给「想记某张旧图」的进阶用法 |
 | 后台反馈 | 记账成功后会通知 | 后台 dialog 弹不出来，所以写一条回执，App 回到前台时在聊天流里补一行 + 把那笔账铺出来（能点开改、左滑删） |
 | 记账设置 | 选择账本、图片自动存档 | 同样两项，外加存档大小显示与一键清空 |
+
+**v1.0 把「双击背面」从视图里搬出来**
+
+真机反馈：App 跳过来了、顶部显示「正在读刚截的那张图…」，然后没有任何后续。
+
+根因不在识别，在**时序**。v0.9 的链路是这样的：
+
+```
+Intent.perform → ScanPending.mark()
+   ├ UserDefaults 票据
+   └ NotificationCenter.post  ──→ RootView.onReceive → ScanRelay → ChatView.onChange → 读图
+```
+
+每一环都假设「视图已经挂载、订阅已经注册」。而 `openAppWhenRun = true` 的顺序是
+**先起 App、再跑 perform**：App 冷启动要几百毫秒，`post` 往往早于 `RootView` 的
+`.onReceive` 注册 —— 那一声没人听见。UserDefaults 那张票本该兜住，可 `RootView` 只在
+`onAppear` / `scenePhase 变化` 时取票，而这两个钩子都已经过去了。票就静静躺着。
+
+结果就是：物理链路全通（App 起来了），逻辑链路断在一个没人监听的广播上。
+
+改法是把执行者从视图搬到常驻单例 `ScanCoordinator`：
+
+```
+Intent.perform
+   └→ ScanCoordinator.shared.scanFromShortcut()   ← 就在 App 进程里，直接调
+        ├ 找图（4 轮回查，0.6s 一次）
+        ├ 读图（12s 超时，防 iCloud 图片永不回调 → 界面卡死）
+        ├ OCR + 解析 + 入账 + 同步
+        └ 发布 banner / pendingRecordIds
+             ├ RootView 顶部浮层：任何 tab 都看得见进度和结果
+             ├ RootView 收到 focusChat 自增 → 切到记账页
+             └ ChatView 挂载时或结果变化时 drain 一次 → 铺成记录行
+```
+
+两个附带的好处：
+
+- **晚到也不会漏**：`pendingRecordIds` 是队列，聊天页什么时候来取都行，
+  `onAppear` 也会补一次（冷启动时聊天页可能比结果晚到）。
+- **进度全局可见**：以前只在聊天页里显示，用户双击完停在「我的」页就什么都看不到 ——
+  这正是「卡在一句话上」的观感来源。
+
+另外把「立即读取最新一张截图」（我的 / 引导页）也改成走同一个 coordinator：
+原来它把结果交给聊天页，而用户站在「我的」页时聊天页未必挂载，结果直接丢掉。
 
 **v0.9 修「刚截完却说没有截图」**
 
@@ -152,6 +195,7 @@ SnapLedger/
   SyncEngine.swift       ★ 同步客户端，从 sync.js 移植（LWW + 墓碑 + 水位线 + 自愈）
   VisionOCR.swift        Vision 中文识别 + 截屏感知（相册增量检测）
   RecordIntent.swift     App Intents：记一笔 / 截图记账（两个参数，对齐百事那条快捷指令）
+  ScanCoordinator.swift  ★ 双击背面的唯一执行者：找图 → 读图 → 识别 → 入账（不依赖视图）
   ScanGuide.swift        ★ AI 自动记账引导页（四步）+ 记账设置 + 截图存档
   ImportSheet.swift      CSV / 粘贴表格导入（表头猜测 + Excel 序列号）
   CalendarHeat.swift     月历热力图
