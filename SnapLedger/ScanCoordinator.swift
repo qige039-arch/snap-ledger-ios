@@ -24,41 +24,14 @@
 
 import SwiftUI
 import Photos
-// Darwin 通知（CFNotificationCenter）在 CoreFoundation 里，SwiftUI 不会间接带上
-import CoreFoundation
 
 
-// MARK: - 跨进程叫门
+// MARK: - 叫门协议
 //
-// 快捷指令的 `perform` 有可能被 iOS 放在独立进程里跑，UserDefaults 写得进去，
-// 但 `NotificationCenter`（进程内）传不过来。Darwin 通知是系统级的，跨进程必达。
-// 双保险：信号走 Darwin，票据走 UserDefaults（信号万一在 App 挂载前发出去，
-// 票据由短时轮询兜住）。
-enum ScanSignal {
-    static let darwinName = "com.snapledger.scan.requested"
-
-    static func post() {
-        CFNotificationCenterPostNotification(
-            CFNotificationCenterGetDarwinNotificationCenter(),
-            CFNotificationName(darwinName as CFString), nil, nil, true)
-    }
-
-    /// 注册一次就够（ScanCoordinator 是单例，跟 App 同生共死）。
-    /// Darwin 回调可能来自任意线程，统一抛回主线程。
-    static func observe(_ block: @escaping () -> Void) {
-        final class Box { let block: () -> Void
-            init(_ b: @escaping () -> Void) { block = b } }
-        let box = Unmanaged.passRetained(Box(block)).toOpaque()
-        CFNotificationCenterAddObserver(
-            CFNotificationCenterGetDarwinNotificationCenter(), box,
-            { _, observer, _, _, _ in
-                guard let observer else { return }
-                let box = Unmanaged<Box>.fromOpaque(observer).takeUnretainedValue()
-                DispatchQueue.main.async(execute: box.block)
-            },
-            darwinName as CFString, nil, .deliverImmediately)
-    }
-}
+// 快捷指令的 perform 可能跑在独立进程里，进程内的 NotificationCenter 传不过来。
+// 跨进程通道用「UserDefaults 票据 + App 侧轮询」：mark() 打上时间戳票据，
+// App 回到前台的 30 秒里每 0.6 秒查一次票。读 UserDefaults 是微秒级操作，轮询零负担。
+// Darwin 通知（CFNotificationCenter）在 Xcode 26 的 Swift 里不再可见，弃用。
 
 @MainActor
 final class ScanCoordinator: ObservableObject {
@@ -86,29 +59,26 @@ final class ScanCoordinator: ObservableObject {
     private var bannerTask: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
 
-    private init() {
-        // 快捷指令那边一敲门（不管它跑在哪个进程），这边就接手
-        ScanSignal.observe { [weak self] in self?.consumeSignal() }
-    }
+    private init() {}
 
-    /// Darwin 信号 / 票据轮询的统一落点
+    /// 票据轮询的统一落点
     func consumeSignal() {
         guard ScanPending.takeIfFresh() else { return }
         scanFromShortcut()
     }
 
-    /// App 回到前台后的 10 秒里轮询票据。
+    /// App 回到前台后的 30 秒里轮询票据。
     ///
-    /// Darwin 信号如果发在 RootView 挂载之前（App 冷启动 + Intent 抢跑），
-    /// 单例还没创建、监听还没注册，那一声就丢了 —— 这张票靠轮询兜住。
-    /// UserDefaults 读一次是微秒级，每 0.4 秒查一次毫无压力。
+    /// Intent mark 票的时机和 App 变 active 的先后不确定（冷启动时两者赛跑），
+    /// 固定查一次会漏 —— 窗口给足 30 秒，谁先谁后都接得住。
+    /// UserDefaults 读一次是微秒级，每 0.6 秒查一次毫无压力。
     func armPolling() {
         pollingTask?.cancel()
         pollingTask = Task { [weak self] in
-            for _ in 0..<25 {
+            for _ in 0..<50 {
                 guard let self, !Task.isCancelled else { return }
                 self.consumeSignal()
-                try? await Task.sleep(nanoseconds: 400_000_000)
+                try? await Task.sleep(nanoseconds: 600_000_000)
             }
         }
     }
@@ -139,7 +109,7 @@ final class ScanCoordinator: ObservableObject {
     // MARK: 主流程
 
     private func scan(window: TimeInterval, force: Bool, fromShortcut: Bool) async {
-        // 一次双击会从两条路进来（Darwin 信号 + UserDefaults 票据轮询），
+        // 一次双击会从两条路进来（进程内通知 + 票据轮询），
         // 所以两头都堵：正在跑就返回；同一瞬间的重复请求也丢掉。
         if busy { return }
         if fromShortcut, Date().timeIntervalSince(lastStart) < 2 { return }

@@ -24,10 +24,8 @@ enum ScanPending {
 
     static func mark() {
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: key)
-        // perform 可能跑在独立进程里，进程内的 NotificationCenter 传不过去；
-        // Darwin 通知是系统级的，跨进程必达。App 侧由 ScanCoordinator 接收。
-        ScanSignal.post()
-        // 同进程的情况（perform 跑在主 App 进程里）再喊一嗓子，两条路任一命中即可
+        // 同进程（perform 跑在主 App 进程里）直接喊一嗓子；
+        // 独立进程传不过来的情况，由 App 侧的票据轮询兜住（armPolling）。
         NotificationCenter.default.post(name: .snapScanRequested, object: nil)
     }
 

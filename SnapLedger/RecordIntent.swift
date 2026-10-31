@@ -213,8 +213,8 @@ struct AddLatestScreenshotIntent: AppIntent {
         // 卡在正在读，然后没有然后」。而且在独立进程里写账本文件，
         // 会和前台 App 的内存数据库互相覆盖，是数据隐患。
         //
-        // 正确姿势：Intent 只留信号（UserDefaults 票据 + Darwin 跨进程广播），
-        // 由 App 进程里的 ScanCoordinator 接手 —— 那儿有完整生命周期，
+        // 正确姿势：Intent 只留票据（UserDefaults 时间戳），
+        // 由 App 进程里的 ScanCoordinator 轮询接手 —— 那儿有完整生命周期，
         // 数据库、UI、同步都在同一个进程里。
         let auth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         if auth == .denied || auth == .restricted {
