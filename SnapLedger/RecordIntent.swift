@@ -214,38 +214,23 @@ struct AddLatestScreenshotIntent: AppIntent {
     /// 双击背面要跳到 App 里，用户才看得见账记到哪儿去了
     static var openAppWhenRun: Bool = true
 
-    /// 和 ScreenshotWatcher 里自动识别用的是同一个 key，
-    /// 两边共用去重状态，不会出现「自动读过一次、双击又记一遍」。
-    private static let lastAssetKey = "snap.lastScreenshotAsset"
-
-    /// 只认 10 分钟内的截图。太宽会把上午的图捞出来记错账。
-    private static let window: TimeInterval = 600
-
     init() {}
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        // 权限没给就别放行 —— 到了前台再报错，用户至少知道该去点哪
+        // 这里只判一件事：权限有没有被关掉。
+        //
+        // 不要在 Intent 里预判「相册里有没有截图」—— v0.8 就栽在这：
+        // 双击背面那一刻，刚截的图往往还没写进相册、索引也还没更新，
+        // 在 App 起来之前判一次就等于提前判死刑，用户看到「最近 10 分钟没有截图」，
+        // 但他明明刚截完。找图、重试、认图全部交给前台的 ScreenshotWatcher。
         let auth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-        guard auth == .authorized || auth == .limited else {
+        if auth == .denied || auth == .restricted {
             ScanPending.mark()
-            IntentReport.write("还没允许访问相册。点这边第 3 步的「现在试一次」，允许之后双击背面才有用。")
-            return .result(dialog: IntentDialog(stringLiteral: "先去 App 里允许访问相册"))
+            IntentReport.write("相册权限被关掉了。到 iOS 设置 → 家庭记账 → 照片 → 改成「完全访问」，再双击背面。")
+            return .result(dialog: IntentDialog(stringLiteral: "先去 iOS 设置里允许访问照片"))
         }
 
-        guard let asset = ScreenshotWatcher.latestScreenshot(within: Self.window) else {
-            ScanPending.mark()
-            IntentReport.write("最近 10 分钟相册里没有新截图。买完东西先截个屏，再双击背面。")
-            return .result(dialog: IntentDialog(stringLiteral: "最近 10 分钟没有新截图"))
-        }
-
-        // 同一张只记一次。双击两次、或者手滑连点，不该出两笔账。
-        if UserDefaults.standard.string(forKey: Self.lastAssetKey) == asset.localIdentifier {
-            IntentReport.write("这张截图刚才已经记过了，不会重复记。要记新的就先截个屏。")
-            return .result(dialog: IntentDialog(stringLiteral: "这张已经记过了"))
-        }
-
-        // 真正的识别交给 App 前台做：用户看得见「正在读哪张图」，认错了当场能改
         ScanPending.mark()
         return .result(dialog: IntentDialog(stringLiteral: "正在读刚截的那张图…"))
     }

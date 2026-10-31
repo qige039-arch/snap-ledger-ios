@@ -33,11 +33,14 @@ private enum MeRoute: Identifiable {
 struct MeView: View {
     @ObservedObject private var store = LedgerStore.shared
     @ObservedObject private var sync = SyncEngine.shared
+    /// 点「立即读取最新一张截图」要有反馈，否则用户点了觉得没反应
+    @ObservedObject private var watcher = ScreenshotWatcher.shared
 
     @State private var joinCode = ""
     @State private var busy = false
     @State private var err: String?
     @State private var photoStatus = "读取中…"
+    @State private var photoLatest = ""
     @State private var route: MeRoute?
     @State private var shareURL: URL?
     @State private var showCodeCopied = false
@@ -411,10 +414,24 @@ struct MeView: View {
                 .buttonStyle(.plain)
             }
 
+            // 诊断行：双击背面说「没有截图」时，这一行能直接看出是权限、还是图没进相册
+            if !photoLatest.isEmpty {
+                HStack {
+                    Text("相册里最新一张")
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(Theme.ink)
+                    Spacer()
+                    Text(photoLatest)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(photoLatest.contains("不是截图") ? Theme.expense : Theme.ink2)
+                }
+            }
+
             Button {
                 Task {
                     await ScreenshotWatcher.shared.pickUpNow()
                     photoStatus = await statusText()
+                    photoLatest = await latestText()
                 }
             } label: {
                 HStack {
@@ -429,6 +446,15 @@ struct MeView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+
+            // 识别过程/失败原因要看得见，不然点了像没反应
+            if !watcher.status.isEmpty {
+                Text(watcher.status)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.ink2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
             Text("双击背面会跳到本 App，自动读刚截的那张图并记上，图不出手机。")
                 .font(.system(size: 11.5))
@@ -675,6 +701,17 @@ struct MeView: View {
 
     private func refreshPhotoStatus() async {
         photoStatus = await statusText()
+        photoLatest = await latestText()
+    }
+
+    /// 相册里最新的一张图是什么时候的、是不是截图。
+    /// 双击背面报「没有截图」时，看这一行就能分清是权限问题还是图没进相册。
+    private func latestText() async -> String {
+        guard let a = ScreenshotWatcher.newestImage(), let d = a.creationDate else {
+            return "读不到图片"
+        }
+        let shot = a.mediaSubtypes.contains(.photoScreenshot)
+        return ScreenshotWatcher.relative(d) + (shot ? "（截图）" : "（不是截图）")
     }
 }
 

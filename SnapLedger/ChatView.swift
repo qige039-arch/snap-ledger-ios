@@ -510,13 +510,6 @@ struct ChatView: View {
             items.append(.tip(id: "tip1",
                               body: "付款截图后双击手机背面回来，我会自己找到那张图认出来。也可以点左下角相册按钮手动读。"))
         }
-
-        // 双击背面进来的这一次，交给 consumeScanRequest 去读（它有 10 分钟窗口，
-        // 正是刚截的那张）。这里再开一条 2 分钟窗口的自动扫描只会打架。
-        let pendingScan = relay.pending > handledScan
-        if !pendingScan {
-            Task { await watcher.pickUpOnLaunch() }
-        }
     }
 
     /// 从相册手选一张图识别。选完立刻给反馈，绝不静默失败。

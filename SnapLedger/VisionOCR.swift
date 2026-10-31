@@ -102,50 +102,68 @@ final class ScreenshotWatcher: ObservableObject {
         }
     }
 
-    /// 冷启动 / 从后台回来时调用：捞最近 2 分钟的截图
-    func pickUpOnLaunch() async {
-        await pickUp(within: 120)
-    }
-
     /// 用户手动点「读取最新一张截图」
     ///
-    /// 之前这里窗口只有 10 分钟、还保留了「同一张只处理一次」的去重，
-    /// 于是「相册里最新截图是半小时前的」或「这张刚被自动读过」时，点了完全没反应。
-    /// 手动点就是要重读：窗口放到 7 天，并且强制跳过去重。
+    /// 窗口放到 7 天并强制跳过去重 —— 手动点就是要重读，
+    /// 之前卡 10 分钟窗口 + 去重，导致「相册里最新截图是半小时前的」时点了完全没反应。
+    ///
+    /// 注意：原来还有一个 `pickUpOnLaunch()`（打开 App 自动读最近 2 分钟），已删掉。
+    /// 它和「双击背面」会同时触发，两条查询互相抢，后到的那趟被丢掉就误报「没有截图」。
+    /// 现在只保留显式入口 —— 双击背面 / 自己点按钮，行为可预期。
     func pickUpNow() async {
         await pickUp(within: 7 * 24 * 3600, force: true)
     }
 
-    /// 双击背面进来时用：只认最近 10 分钟的截图。
+    /// 双击背面进来时用。
     ///
-    /// 这里不能学 `pickUpNow` 放到 7 天 —— 双击背面刚从付款页回来，
-    /// 用户期待的是「刚截的那张」。窗口放宽就会把三天前的图翻出来记成一笔。
+    /// 窗口给 30 分钟：用户截完图可能先看了眼账单才双击，卡 10 分钟会冤枉人。
+    /// `force` 保持 false —— 同一张截图不该被两次双击记成两笔。
     func pickUpFromDoubleTap() async {
-        await pickUp(within: 600, force: true)
+        await pickUp(within: 1800)
     }
 
     private func pickUp(within seconds: TimeInterval, force: Bool = false) async {
-        // 冷启动时「双击背面的请求」和「打开 App 自动读」可能同时到，
-        // 两条都在跑就会弹两张一模一样的卡片。串行化，后来的直接放弃。
-        guard !isPicking else { return }
+        // 串行化：双击背面和「刚截屏」的自动读可能同时到，两条都在跑会弹两张一样的卡片。
+        // 后来的一趟要排队等，不能直接丢掉 —— 丢掉的那趟如果是双击，用户就白双击了。
+        var waited = 0
+        while isPicking, waited < 50 {
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            waited += 1
+        }
         isPicking = true
         defer { isPicking = false }
 
         let auth = await Self.ensurePhotoAccess()
         guard auth == .authorized || auth == .limited else {
-            flash("没有相册权限。去 设置 → 家庭记账 → 照片 里改成「全部照片」")
+            flash("没有相册权限。iOS 设置 → 家庭记账 → 照片 → 选「完全访问」", clearAfter: 8)
             return
         }
-        if auth == .limited {
-            flash("相册权限是「仅选中的照片」，新截图可能读不到", clearAfter: 6)
+
+        // 三轮回查，每轮隔 0.7 秒。
+        // 刚截的图写进相册有几百毫秒到一两秒的延迟，一次查不到就下结论会冤枉用户
+        // （v0.8 的「最近 10 分钟没有截图」就是这么来的）。
+        // 第一轮只认带截图标记的图，之后放宽到任意图片 ——
+        // 快捷指令「截取屏幕」动作存出来的图不带 photoScreenshot 标记。
+        flash("正在找刚截的那张图…", clearAfter: 30)
+        var asset: PHAsset?
+        for attempt in 0..<3 {
+            asset = Self.latestScreenshot(within: seconds, allowAnyImage: attempt > 0)
+            if asset != nil { break }
+            if attempt < 2 {
+                try? await Task.sleep(nanoseconds: 700_000_000)
+            }
         }
-        guard let asset = Self.latestScreenshot(within: seconds) else {
-            flash(seconds < 3600 ? "相册里最近没有截图，先截一张再回来" : "相册里还没找到截图")
+
+        guard let asset else {
+            flash(Self.noShotHint(seconds: seconds, auth: auth), clearAfter: 12)
             return
         }
 
         // 同一张截图只自动处理一次，避免每次打开都弹同一张卡片；手动点则不受限
-        if !force, UserDefaults.standard.string(forKey: lastAssetKey) == asset.localIdentifier { return }
+        if !force, UserDefaults.standard.string(forKey: lastAssetKey) == asset.localIdentifier {
+            flash("这张截图刚才已经记过了。要记新的就先截个屏", clearAfter: 6)
+            return
+        }
         UserDefaults.standard.set(asset.localIdentifier, forKey: lastAssetKey)
 
         flash("正在识别\(Self.relative(asset.creationDate))的截图…", clearAfter: 30)
@@ -160,6 +178,18 @@ final class ScreenshotWatcher: ObservableObject {
         }
         status = ""
         incoming = text
+    }
+
+    /// 找不到图时说清楚是哪一种「找不到」，别只甩一句「没有截图」
+    static func noShotHint(seconds: TimeInterval, auth: PHAuthorizationStatus) -> String {
+        if auth == .limited {
+            return "相册权限是「仅选中的照片」，看不到新截图。iOS 设置 → 家庭记账 → 照片 → 改成「完全访问」。"
+        }
+        let span = seconds < 3600 ? "\(max(1, Int(seconds / 60))) 分钟" : "\(Int(seconds / 86_400)) 天"
+        if let newest = newestImage(), let d = newest.creationDate {
+            return "相册里最新的一张图是\(relative(d))的，不在最近 \(span)里。先把截图存进相册，或者点左下角相册按钮手动选。"
+        }
+        return "相册里读不到任何图片。到 iOS 设置 → 家庭记账 → 照片，确认选了「完全访问」。"
     }
 
     /// 状态提示：显示几秒后自己消失，免得一直挂在聊天顶上
@@ -202,22 +232,37 @@ final class ScreenshotWatcher: ObservableObject {
         return status
     }
 
-    static func latestScreenshot(within seconds: TimeInterval) -> PHAsset? {
+    /// 找窗口内最近的一张截图
+    ///
+    /// - Parameter allowAnyImage: 找不到带「截图」标记的图时，是否接受窗口内任意一张图。
+    ///   必须有这一档：快捷指令的「截取屏幕」动作存出来的图**不带** `photoScreenshot` 标记，
+    ///   只按标记找会一张都找不到 —— 用户看到的就是「没有截图」，但他明明刚截过。
+    static func latestScreenshot(within seconds: TimeInterval, allowAnyImage: Bool = false) -> PHAsset? {
         let options = PHFetchOptions()
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        options.fetchLimit = 40
+        options.fetchLimit = 60
         options.predicate = NSPredicate(format: "creationDate > %@",
                                         Date().addingTimeInterval(-seconds) as NSDate)
 
         let assets = PHAsset.fetchAssets(with: .image, options: options)
-        var found: PHAsset?
+        var shot: PHAsset?
+        var any: PHAsset?
         assets.enumerateObjects { asset, _, stop in
+            if any == nil { any = asset }
             if asset.mediaSubtypes.contains(.photoScreenshot) {
-                found = asset
+                shot = asset
                 stop.pointee = true
             }
         }
-        return found
+        return shot ?? (allowAnyImage ? any : nil)
+    }
+
+    /// 相册里最新的一张图（不限时间）。只为在「找不到」时给出可读的原因。
+    static func newestImage() -> PHAsset? {
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        options.fetchLimit = 1
+        return PHAsset.fetchAssets(with: .image, options: options).firstObject
     }
 
     static func image(of asset: PHAsset) async -> UIImage? {
