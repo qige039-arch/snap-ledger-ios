@@ -119,6 +119,95 @@ enum ScanArchive {
         return (items.count, total)
     }
 
+    // MARK: 聊天流里的截图缩略图
+    //
+    // 用户的心智是「截图发到聊天框，App 认出金额」。所以每笔由截图记来的账，
+    // 聊天流里要能看见那张图 —— 对图核账最省心，也能立刻发现「认错图了」。
+    //
+    // 为什么单独存一份小图、而不是直接引用系统相册里的原图：
+    // 1. 直传路线（截取屏幕 → 认这张图）的图**根本不在相册里**，相册引用是空；
+    // 2. 引用相册意味着要长期持有相册权限，用户一旦收紧权限，历史图全掉；
+    // 3. 原图 3–4MB，聊天里只要缩略图，长边 900 就够看清金额，一张约 120KB。
+    //
+    // 存本 App 沙盒，不进系统相册。只保留最近 60 张，多的自动清掉。
+
+    private static let chatFolder = "chat-shots"
+    private static let chatMapKey = "snap.chat.shots"
+    private static let chatKeep = 60
+
+    static var chatDir: URL {
+        let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let d = base.appendingPathComponent(chatFolder, isDirectory: true)
+        if !FileManager.default.fileExists(atPath: d.path) {
+            try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        }
+        return d
+    }
+
+    /// 给某一笔账存一张聊天里用的缩略图。文件名就是 recordId，天然一一对应。
+    @discardableResult
+    static func saveChatShot(_ image: UIImage, recordId: String) -> Bool {
+        let w = image.size.width
+        let h = image.size.height
+        guard w > 0, h > 0, !recordId.isEmpty else { return false }
+
+        let maxSide: CGFloat = 900
+        let scale = min(1, maxSide / max(w, h))
+        let size = CGSize(width: (w * scale).rounded(), height: (h * scale).rounded())
+
+        let fmt = UIGraphicsImageRendererFormat.default()
+        fmt.scale = 1
+        let small = UIGraphicsImageRenderer(size: size, format: fmt).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
+        guard let data = small.jpegData(compressionQuality: 0.72) else { return false }
+
+        let url = chatDir.appendingPathComponent("\(recordId).jpg")
+        guard (try? data.write(to: url, options: .atomic)) != nil else { return false }
+
+        var map = UserDefaults.standard.dictionary(forKey: chatMapKey) as? [String: String] ?? [:]
+        map[recordId] = "\(recordId).jpg"
+        UserDefaults.standard.set(map, forKey: chatMapKey)
+
+        pruneChatShots()
+        return true
+    }
+
+    /// 取某笔账的截图。没有就返回 nil（聊天里就不画图，不占位）。
+    static func chatShot(recordId: String) -> UIImage? {
+        let map = UserDefaults.standard.dictionary(forKey: chatMapKey) as? [String: String] ?? [:]
+        guard let name = map[recordId] else { return nil }
+        let url = chatDir.appendingPathComponent(name)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return UIImage(data: data)
+    }
+
+    /// 只留最近 chatKeep 张：按修改时间排序，超出的删文件 + 摘映射。
+    /// 一张 120KB，60 张约 7MB，留一年也不会撑爆。
+    private static func pruneChatShots() {
+        let keys: [URLResourceKey] = [.contentModificationDateKey]
+        guard let items = try? FileManager.default.contentsOfDirectory(
+            at: chatDir, includingPropertiesForKeys: keys) else { return }
+        guard items.count > chatKeep else { return }
+
+        let sorted = items.sorted {
+            let a = (try? $0.resourceValues(forKeys: Set(keys)).contentModificationDate) ?? .distantPast
+            let b = (try? $1.resourceValues(forKeys: Set(keys)).contentModificationDate) ?? .distantPast
+            return a > b
+        }
+        let dead = sorted.dropFirst(chatKeep)
+        var deadNames = Set<String>()
+        for u in dead {
+            deadNames.insert(u.lastPathComponent)
+            try? FileManager.default.removeItem(at: u)
+        }
+
+        // 映射里指向已删文件的条目一摘掉，聊天流下次渲染就不会再去找它
+        var map = UserDefaults.standard.dictionary(forKey: chatMapKey) as? [String: String] ?? [:]
+        map = map.filter { !deadNames.contains($0.value) }
+        UserDefaults.standard.set(map, forKey: chatMapKey)
+    }
+
     /// 只清自己这个目录里的文件，绝不碰别的地方
     static func clear() {
         guard let items = try? FileManager.default.contentsOfDirectory(at: dir,
@@ -164,14 +253,13 @@ struct ScanGuideView: View {
                         .foregroundStyle(Theme.brand)
                         .padding(.top, 4)
 
-                    stepCard(1, title: "创建「截图记账」快捷指令",
-                             text: "注意：双击背面本身不会截屏，快捷指令里「截取屏幕」的结果默认也不进相册 —— 所以快捷指令必须按下面四步拼，少一步 App 就找不到那张图。") {
+                    stepCard(1, title: "创建「轻点背面」快捷指令",
+                             text: "三步就够。截图直接递给本 App 识别，不经过系统相册 —— 相册里不会多出一堆记账截图。") {
                         VStack(spacing: 10) {
                             VStack(alignment: .leading, spacing: 7) {
-                                stepLine("1", "打开快捷指令 App，新建一个快捷指令")
-                                stepLine("2", "加动作「截取屏幕」")
-                                stepLine("3", "再加「存储到相册」—— 没有这一步，截图只在快捷指令手里，App 永远找不到")
-                                stepLine("4", "最后加「截图记账」（在「家庭记账」分组里能搜到）")
+                                stepLine("1", "快捷指令 App → 新建 → 加动作「截取屏幕」")
+                                stepLine("2", "再加动作「认这张图」（在「家庭记账」分组里能搜到）")
+                                stepLine("3", "关键一步：点「认这张图」的「截图」参数，选上一步「截取屏幕」的结果 —— 图就是从这里递进 App 的")
                             }
                             .padding(11)
                             .background(Theme.card2, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
@@ -209,7 +297,7 @@ struct ScanGuideView: View {
                                 withAnimation { advancedOpen.toggle() }
                             } label: {
                                 HStack(spacing: 4) {
-                                    Text(advancedOpen ? "收起进阶用法" : "进阶：从快捷指令里指定任意一张图")
+                                    Text(advancedOpen ? "收起备选路线" : "参数连不上？看备选路线")
                                         .font(.system(size: 11.5, weight: .medium))
                                         .foregroundStyle(Theme.ink3)
                                     Image(systemName: advancedOpen ? "chevron.up" : "chevron.down")
@@ -225,7 +313,7 @@ struct ScanGuideView: View {
                     }
 
                     stepCard(2, title: "设置触发方式",
-                             text: "设置 → 辅助功能 → 触控 → 轻点背面 → 轻点两下，选「截图记账」。之后在任何界面双击手机背面，本 App 会自己弹到前台，把刚截的那张图认出来、记上。") {
+                             text: "设置 → 辅助功能 → 触控 → 轻点背面 → 轻点两下，选刚才那个快捷指令。之后在任何界面双击手机背面，本 App 会弹到前台，把刚截的那张图认出来、记上，图也直接铺在聊天里。") {
                         VStack(spacing: 8) {
                             Button {
                                 withAnimation { phoneSteps.toggle() }
@@ -259,8 +347,8 @@ struct ScanGuideView: View {
                         }
                     }
 
-                    stepCard(3, title: "先在这里授权相册",
-                             text: "这一步别跳过。读截图要先允许访问照片，在这里点一次授权好，双击背面时就直接进入识别，不会先被系统弹窗拦住。") {
+                    stepCard(3, title: "相册权限（可选，用不到可跳过）",
+                             text: "上面三步的直传路线不读相册，不给照片权限也能用。只有备选路线（截图先存进相册再由 App 去取）和下面的「手动读相册」才需要照片权限。") {
                         VStack(spacing: 8) {
                             Button {
                                 tryNow()
@@ -429,9 +517,13 @@ struct ScanGuideView: View {
 
     private var advancedSteps: some View {
         VStack(alignment: .leading, spacing: 8) {
-            stepLine("1", "快捷指令里加「截取屏幕」（或「选择照片」，挑相册里任意一张）")
-            stepLine("2", "再加本 App 的「认这张图」，把上一步的结果连到「截图」参数")
-            Text("这条路把图直接递进 App，不用「存储到相册」，相册也不会多出截图。适合想记某张旧账单、或者把别的 App 转发来的图也记上账的情况；日常双击背面用上面那个四步配方更稳。")
+            Text("备选：走相册的中转路线")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(Theme.ink2)
+            stepLine("1", "快捷指令加「截取屏幕」")
+            stepLine("2", "加「存储到相册」")
+            stepLine("3", "加「截图记账」（零参数那个），不用连线")
+            Text("好处是少一步连线、不会连错；代价是每笔都往系统相册里存一张截图。不想让相册里堆记账图，就别用这条。")
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.ink3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -442,7 +534,7 @@ struct ScanGuideView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.ink3)
             copyRow("snapledger://scan")
-            Text("它会打开 App 并自动读最新截图。好处是两个动作配完就能跨手机照抄，坏处是会切到 App 前台。")
+            Text("它会打开 App 并自动读最新截图（同样靠相册）。")
                 .font(.system(size: 10.5))
                 .foregroundStyle(Theme.ink3)
                 .fixedSize(horizontal: false, vertical: true)

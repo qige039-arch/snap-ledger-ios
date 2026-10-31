@@ -172,15 +172,19 @@ final class ScreenshotWatcher: ObservableObject {
     }
 
     /// 找不到图时说清楚是哪一种「找不到」，别只甩一句「没有截图」
+    ///
+    /// 主路线是「截取屏幕 → 认这张图」直传，图根本不进相册；
+    /// 只有当快捷指令没把图递进来时，App 才退到相册找。所以这里的措辞
+    /// 先指向「参数连线」，再说相册 —— 反过来会把用直传的人带偏。
     static func noShotHint(seconds: TimeInterval, auth: PHAuthorizationStatus) -> String {
         if auth == .limited {
-            return "相册权限是「仅选中的照片」，看不到新截图。iOS 设置 → 家庭记账 → 照片 → 改成「完全访问」。"
+            return "相册权限是「仅选中的照片」，看不到新截图。用直传路线（截取屏幕 → 认这张图）的话不用管这条；走相册路线才需要改成「完全访问」。"
         }
         let span = seconds < 3600 ? "\(max(1, Int(seconds / 60))) 分钟" : "\(Int(seconds / 86_400)) 天"
         if let newest = newestImage(), let d = newest.creationDate {
-            return "相册里最新的一张图是\(relative(d))的，不在最近 \(span)里。检查快捷指令里有没有「存储到相册」这一步 —— 「截取屏幕」的结果默认不进相册，App 就找不到；也可以点左下角相册按钮手动选。"
+            return "没等到图。相册里最新一张是\(relative(d))的，最近 \(span) 里没有新的。如果你用的是「截取屏幕 → 认这张图」，检查「截图」参数有没有连上截屏结果；走相册路线的话要加「存储到相册」。也可以点左下角相册按钮手动选。"
         }
-        return "相册里读不到任何图片。到 iOS 设置 → 家庭记账 → 照片，确认选了「完全访问」。"
+        return "没读到图。用直传路线的话，检查快捷指令里「截图」参数是否连上了「截取屏幕」的结果；走相册路线则到 iOS 设置 → 家庭记账 → 照片 选「完全访问」。"
     }
 
     /// 状态提示：显示几秒后自己消失，免得一直挂在聊天顶上

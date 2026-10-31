@@ -149,11 +149,9 @@ struct AddRecordFromImageIntent: AppIntent {
             UserDefaults.standard.removeObject(forKey: "snap.relay.note")
         }
 
-        let auth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-        if auth == .denied || auth == .restricted {
-            IntentReport.write("相册权限被关掉了。到 iOS 设置 → 家庭记账 → 照片 → 改成「完全访问」。")
-        }
-
+        // 这里**不再检查相册权限**。这条路把图直接写进沙盒，本来就不经过相册 ——
+        // 用户为了不让截图堆进相册而关掉照片权限，是完全合理的用法，
+        // 以前在这里报「相册权限被关掉了」等于把人往回拽。
         ScanPending.mark()
         return .result()
     }
@@ -234,7 +232,19 @@ struct AddLatestScreenshotIntent: AppIntent {
 struct SnapLedgerShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         // 排第一个 = 在快捷指令 App 的「家庭记账」分组里露在最上面。
-        // 零参数、双击背面直接能跑，这是主推动作。
+        //
+        // 主推「认这张图」（带图直传）：截图直接递进 App，不经过系统相册 ——
+        // 既不会往相册里堆记账截图，也不受相册索引延迟影响。
+        // 零参数的「读最新截图记账」排在第二位，它靠相册，只在不想连线时当备选。
+        AppShortcut(
+            intent: AddRecordFromImageIntent(),
+            phrases: [
+                "用 \(.applicationName) 记这张图",
+                "\(.applicationName) 认这张图"
+            ],
+            shortTitle: "认这张图",
+            systemImageName: "photo.badge.checkmark"
+        )
         AppShortcut(
             intent: AddLatestScreenshotIntent(),
             phrases: [
@@ -244,15 +254,6 @@ struct SnapLedgerShortcuts: AppShortcutsProvider {
             ],
             shortTitle: "截图记账",
             systemImageName: "camera.viewfinder"
-        )
-        AppShortcut(
-            intent: AddRecordFromImageIntent(),
-            phrases: [
-                "用 \(.applicationName) 记这张图",
-                "\(.applicationName) 认这张图"
-            ],
-            shortTitle: "认这张图",
-            systemImageName: "photo.badge.checkmark"
         )
         AppShortcut(
             intent: AddRecordIntent(),

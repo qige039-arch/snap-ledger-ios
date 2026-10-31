@@ -133,18 +133,23 @@ final class ScanCoordinator: ObservableObject {
     private func doScan(window: TimeInterval, force: Bool, fromShortcut: Bool) async {
         say("正在找刚截的那张图…", keep: 40)
 
-        let auth = await ScreenshotWatcher.ensurePhotoAccess()
-        guard auth == .authorized || auth == .limited else {
-            say("没有相册权限。到 iOS 设置 → 家庭记账 → 照片，改成「完全访问」", keep: 14)
-            return
-        }
-
-        // 快捷指令「认这张图」递进来的图优先 —— 它不在相册里，按相册找会扑空。
-        // 文件在但一时读不出（正在被写）时这里会等，不会急着掉进相册查询。
+        // ① 直传图优先，而且**不问相册权限**。
+        // 「截取屏幕 → 认这张图」把图直接递进沙盒，相册里一张图都不会多 ——
+        // 这才是主路径。以前把权限检查放在最前面，结果是：用户为了不污染相册
+        // 关掉了照片权限，明明图已经递进来了，却先被一句「没有相册权限」拦住。
         if let direct = await Self.takeRelayImage() {
             let note = UserDefaults.standard.string(forKey: Self.relayNoteKey)
             UserDefaults.standard.removeObject(forKey: Self.relayNoteKey)
             await recognize(image: direct, note: note)
+            return
+        }
+
+        // ② 没直传图，才去相册找（走这条路才需要相册权限）
+        let auth = await ScreenshotWatcher.ensurePhotoAccess()
+        guard auth == .authorized || auth == .limited else {
+            // 图没递进来时这里最容易误伤：用户在「认这张图」路线下本来就不需要相册，
+            // 所以先把「检查快捷指令参数」放在前面说，别一上来就让人去改权限。
+            say("没收到直传的图。快捷指令是「截取屏幕 → 认这张图」的话，检查「截图」参数有没有连上截屏结果；要走相册路线才需要照片权限——到设置里选「完全访问」", keep: 16)
             return
         }
 
@@ -205,7 +210,6 @@ final class ScanCoordinator: ObservableObject {
         if ScanSettings.archiveImages {
             _ = ScanArchive.save(image)
         }
-
         let text = await ScreenshotWatcher.recognizeOffMain(image)
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             say("这张图里没读到文字。确认是付款/账单页再试，也可以点左下角相册按钮手动选", keep: 14)
@@ -224,6 +228,10 @@ final class ScanCoordinator: ObservableObject {
         if rec.member.isEmpty { rec.member = LedgerStore.shared.selfMemberId }
         let saved = LedgerStore.shared.add(rec)
         SyncEngine.shared.now()
+
+        // 截图本身铺进聊天流（用户要的就是「截图发在聊天框」）：
+        // 存在本 App 沙盒，不进系统相册，只留缩略图。
+        ScanArchive.saveChatShot(image, recordId: saved.id)
 
         pendingRecordIds.append(saved.id)
         if let fp {

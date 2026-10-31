@@ -21,6 +21,9 @@ enum ChatItem: Identifiable {
     /// 只存 id，渲染时再去 store 里取。这样在别处删掉/改掉一笔，聊天里立刻跟着变，
     /// 不会留下一张「点了还在、其实已经删了」的僵尸卡片。
     case record(id: String, recordId: String)
+    /// 截图记的那一笔，上面先铺一张缩略图 —— 用户的期望就是「截图发在聊天框里」，
+    /// 而且对着图核账最快：认错的图一眼能看出来。图不在就什么都不画。
+    case shot(id: String, recordId: String)
     case tip(id: String, body: String)
 
     var id: String {
@@ -28,6 +31,7 @@ enum ChatItem: Identifiable {
         case .text(let id, _, _): return id
         case .card(let id, _, _): return id
         case .record(let id, _): return id
+        case .shot(let id, _): return id
         case .tip(let id, _): return id
         }
     }
@@ -359,6 +363,22 @@ struct ChatView: View {
                     .cardStyle(padding: 0, radius: 14)
                     .padding(.horizontal, 16)
             }
+
+        case .shot(_, let rid):
+            if let img = ScanArchive.chatShot(recordId: rid) {
+                HStack(alignment: .top, spacing: 8) {
+                    assistantAvatar
+                    Image(uiImage: img)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(maxWidth: 190, maxHeight: 250)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(Theme.line, lineWidth: 0.7))
+                    Spacer(minLength: 30)
+                }
+                .padding(.horizontal, 16)
+            }
         }
     }
 
@@ -467,6 +487,7 @@ struct ChatView: View {
                 return false
             }
             if !exists {
+                insertScanShot(rid)
                 items.append(.record(id: "s\(rid)", recordId: rid))
             }
         }
@@ -483,9 +504,16 @@ struct ChatView: View {
                if case .record(_, let existing) = item { return existing == rid }
                return false
            }) {
+            insertScanShot(rid)
             items.append(.record(id: "i\(rid)", recordId: rid))
         }
         items.append(.text(id: UUID().uuidString, mine: false, body: r.text))
+    }
+
+    /// 截图账在记录行前面插一张图。没有缩略图（比如手动读的相册图）就不插，不占位。
+    private func insertScanShot(_ rid: String) {
+        guard ScanArchive.chatShot(recordId: rid) != nil else { return }
+        items.append(.shot(id: "p\(rid)", recordId: rid))
     }
 
     private func bootstrap() {
@@ -511,7 +539,7 @@ struct ChatView: View {
                                body: "说一句话就能记，比如「午饭 32」「老婆买菜 86」。"))
 
             items.append(.tip(id: "tip1",
-                              body: "付款界面直接双击手机背面：快捷指令会截屏、存进相册并拉起本 App，我认出金额就记上。没记上时点左下角相册按钮手动选。"))
+                              body: "付款界面直接双击手机背面：快捷指令把截图直接递给本 App（不经过相册，相册里不会多出图），我认出金额就记上。没记上时点左下角相册按钮手动选。"))
         }
     }
 
