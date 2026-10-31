@@ -164,9 +164,18 @@ struct ScanGuideView: View {
                         .foregroundStyle(Theme.brand)
                         .padding(.top, 4)
 
-                    stepCard(1, title: "添加「截图记账」到快捷指令",
-                             text: "点下面的按钮，把本 App 的动作加进快捷指令。加完不用编辑 —— 它没有参数，双击背面直接把 App 拉起来，自己去相册找刚截的那张图。") {
+                    stepCard(1, title: "创建「截图记账」快捷指令",
+                             text: "注意：双击背面本身不会截屏，快捷指令里「截取屏幕」的结果默认也不进相册 —— 所以快捷指令必须按下面四步拼，少一步 App 就找不到那张图。") {
                         VStack(spacing: 10) {
+                            VStack(alignment: .leading, spacing: 7) {
+                                stepLine("1", "打开快捷指令 App，新建一个快捷指令")
+                                stepLine("2", "加动作「截取屏幕」")
+                                stepLine("3", "再加「存储到相册」—— 没有这一步，截图只在快捷指令手里，App 永远找不到")
+                                stepLine("4", "最后加「截图记账」（在「家庭记账」分组里能搜到）")
+                            }
+                            .padding(11)
+                            .background(Theme.card2, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+
                             ShortcutsLink()
                                 .shortcutsLinkStyle(.automatic)
 
@@ -420,9 +429,9 @@ struct ScanGuideView: View {
 
     private var advancedSteps: some View {
         VStack(alignment: .leading, spacing: 8) {
-            stepLine("1", "快捷指令里加「截屏」（或「选择照片」，挑相册里任意一张）")
+            stepLine("1", "快捷指令里加「截取屏幕」（或「选择照片」，挑相册里任意一张）")
             stepLine("2", "再加本 App 的「认这张图」，把上一步的结果连到「截图」参数")
-            Text("适合想记某张旧账单、或者把别的 App 转发来的图也记上账的情况。日常双击背面用不着这一步。")
+            Text("这条路把图直接递进 App，不用「存储到相册」，相册也不会多出截图。适合想记某张旧账单、或者把别的 App 转发来的图也记上账的情况；日常双击背面用上面那个四步配方更稳。")
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.ink3)
                 .fixedSize(horizontal: false, vertical: true)

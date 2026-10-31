@@ -133,11 +133,15 @@ final class ScanCoordinator: ObservableObject {
             return
         }
 
-        // 四轮回查，每轮 0.6 秒。刚截的图写进相册有几百毫秒到一两秒的延迟，
+        // 轮回查，每轮 0.6 秒。刚截的图写进相册有几百毫秒到一两秒的延迟，
         // 查一次就下结论会冤枉用户。第一轮只认带截图标记的，之后放宽到任意图片 ——
         // 快捷指令「截取屏幕」动作存出来的图不带 photoScreenshot 标记。
+        //
+        // 双击背面那条给足 8 轮（约 5 秒）：截图要等快捷指令的「存储到相册」
+        // 落地后才出现在相册里，中间还隔着 App 启动，比系统截屏慢一拍。
         var asset: PHAsset?
-        for attempt in 0..<4 {
+        let rounds = fromShortcut ? 8 : 4
+        for attempt in 0..<rounds {
             asset = ScreenshotWatcher.latestScreenshot(within: window, allowAnyImage: attempt > 0)
             if asset != nil { break }
             try? await Task.sleep(nanoseconds: 600_000_000)
@@ -160,11 +164,22 @@ final class ScanCoordinator: ObservableObject {
             say("这张图读不出来（可能还在 iCloud 里没下载完），过几秒再双击一次", keep: 12)
             return
         }
-        await recognize(image: image, note: nil)
+        await recognize(image: image, note: nil, force: force)
     }
 
     /// 识别 + 入账。图进来之后的所有步骤都在这儿，两条来源（相册 / 接力文件）共用。
-    private func recognize(image: UIImage, note: String?) async {
+    private func recognize(image: UIImage, note: String?, force: Bool = false) async {
+        // 指纹去重：连着双击两次、或者两条入口同时到，同一张图只记一次。
+        // 相册那条路有 asset id 去重，但接力文件这条路没有 id 可对 ——
+        // 用户截图里那两笔一模一样的 -¥31 就是这么来的。
+        let fp = Self.fingerprint(image)
+        if !force, let fp,
+           UserDefaults.standard.string(forKey: Self.fingerprintKey) == fp,
+           Date().timeIntervalSince1970 - UserDefaults.standard.double(forKey: Self.fingerprintTsKey) < 300 {
+            say("这张图刚才已经记过了", keep: 8)
+            return
+        }
+
         // 先存档再识别：识别失败时图也在，用户还能回头看看是哪张认错了
         if ScanSettings.archiveImages {
             _ = ScanArchive.save(image)
@@ -190,7 +205,22 @@ final class ScanCoordinator: ObservableObject {
         SyncEngine.shared.now()
 
         pendingRecordIds.append(saved.id)
+        if let fp {
+            UserDefaults.standard.set(fp, forKey: Self.fingerprintKey)
+            UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.fingerprintTsKey)
+        }
         say("已记账 · \(saved.category) \(Money.currency(saved.amount))，点一下能改", keep: 10)
+    }
+
+    private static let fingerprintKey = "snap.scan.fp"
+    private static let fingerprintTsKey = "snap.scan.fp.ts"
+
+    /// 图的粗指纹：尺寸 + 压缩后字节数。不是密码学哈希，
+    /// 但「同一张图被两条路各递一次」这种场景足够分辨了。
+    private static func fingerprint(_ image: UIImage) -> String? {
+        guard image.size.width > 0, image.size.height > 0,
+              let data = image.jpegData(compressionQuality: 0.5) else { return nil }
+        return "\(Int(image.size.width))x\(Int(image.size.height)):\(data.count)"
     }
 
     /// 快捷指令「认这张图」写到沙盒的接力文件。取走即删。

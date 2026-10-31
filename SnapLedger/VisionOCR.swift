@@ -178,7 +178,7 @@ final class ScreenshotWatcher: ObservableObject {
         }
         let span = seconds < 3600 ? "\(max(1, Int(seconds / 60))) 分钟" : "\(Int(seconds / 86_400)) 天"
         if let newest = newestImage(), let d = newest.creationDate {
-            return "相册里最新的一张图是\(relative(d))的，不在最近 \(span)里。先把截图存进相册，或者点左下角相册按钮手动选。"
+            return "相册里最新的一张图是\(relative(d))的，不在最近 \(span)里。检查快捷指令里有没有「存储到相册」这一步 —— 「截取屏幕」的结果默认不进相册，App 就找不到；也可以点左下角相册按钮手动选。"
         }
         return "相册里读不到任何图片。到 iOS 设置 → 家庭记账 → 照片，确认选了「完全访问」。"
     }
