@@ -25,6 +25,39 @@
 import SwiftUI
 import Photos
 
+
+// MARK: - 跨进程叫门
+//
+// 快捷指令的 `perform` 有可能被 iOS 放在独立进程里跑，UserDefaults 写得进去，
+// 但 `NotificationCenter`（进程内）传不过来。Darwin 通知是系统级的，跨进程必达。
+// 双保险：信号走 Darwin，票据走 UserDefaults（信号万一在 App 挂载前发出去，
+// 票据由短时轮询兜住）。
+enum ScanSignal {
+    static let darwinName = "com.snapledger.scan.requested"
+
+    static func post() {
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotificationCenter(),
+            CFNotificationName(darwinName as CFString), nil, nil, true)
+    }
+
+    /// 注册一次就够（ScanCoordinator 是单例，跟 App 同生共死）。
+    /// Darwin 回调可能来自任意线程，统一抛回主线程。
+    static func observe(_ block: @escaping () -> Void) {
+        final class Box { let block: () -> Void
+            init(_ b: @escaping () -> Void) { block = b } }
+        let box = Unmanaged.passRetained(Box(block)).toOpaque()
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotificationCenter(), box,
+            { _, observer, _, _, _ in
+                guard let observer else { return }
+                let box = Unmanaged<Box>.fromOpaque(observer).takeUnretainedValue()
+                DispatchQueue.main.async(execute: box.block)
+            },
+            darwinName as CFString, nil, .deliverImmediately)
+    }
+}
+
 @MainActor
 final class ScanCoordinator: ObservableObject {
 
@@ -43,11 +76,40 @@ final class ScanCoordinator: ObservableObject {
     /// 同一张截图只认一次，两条入口共用
     private static let lastAssetKey = "snap.lastScreenshotAsset"
 
+    /// 「认这张图」递进来的备注（v2 这类版本标记在 Intent 侧已滤掉）
+    private static let relayNoteKey = "snap.relay.note"
+
     private var busy = false
     private var lastStart = Date.distantPast
     private var bannerTask: Task<Void, Never>?
+    private var pollingTask: Task<Void, Never>?
 
-    private init() {}
+    private init() {
+        // 快捷指令那边一敲门（不管它跑在哪个进程），这边就接手
+        ScanSignal.observe { [weak self] in self?.consumeSignal() }
+    }
+
+    /// Darwin 信号 / 票据轮询的统一落点
+    func consumeSignal() {
+        guard ScanPending.takeIfFresh() else { return }
+        scanFromShortcut()
+    }
+
+    /// App 回到前台后的 10 秒里轮询票据。
+    ///
+    /// Darwin 信号如果发在 RootView 挂载之前（App 冷启动 + Intent 抢跑），
+    /// 单例还没创建、监听还没注册，那一声就丢了 —— 这张票靠轮询兜住。
+    /// UserDefaults 读一次是微秒级，每 0.4 秒查一次毫无压力。
+    func armPolling() {
+        pollingTask?.cancel()
+        pollingTask = Task { [weak self] in
+            for _ in 0..<25 {
+                guard let self, !Task.isCancelled else { return }
+                self.consumeSignal()
+                try? await Task.sleep(nanoseconds: 400_000_000)
+            }
+        }
+    }
 
     // MARK: 入口
 
@@ -75,7 +137,7 @@ final class ScanCoordinator: ObservableObject {
     // MARK: 主流程
 
     private func scan(window: TimeInterval, force: Bool, fromShortcut: Bool) async {
-        // 一次双击会从两条路进来（Intent 直接调 + UserDefaults 票据），
+        // 一次双击会从两条路进来（Darwin 信号 + UserDefaults 票据轮询），
         // 所以两头都堵：正在跑就返回；同一瞬间的重复请求也丢掉。
         if busy { return }
         if fromShortcut, Date().timeIntervalSince(lastStart) < 2 { return }
@@ -88,6 +150,14 @@ final class ScanCoordinator: ObservableObject {
         let auth = await ScreenshotWatcher.ensurePhotoAccess()
         guard auth == .authorized || auth == .limited else {
             say("没有相册权限。到 iOS 设置 → 家庭记账 → 照片，改成「完全访问」", keep: 14)
+            return
+        }
+
+        // 快捷指令「认这张图」递进来的图优先 —— 它不在相册里，按相册找会扑空
+        if let direct = Self.takeRelayImage() {
+            let note = UserDefaults.standard.string(forKey: Self.relayNoteKey)
+            UserDefaults.standard.removeObject(forKey: Self.relayNoteKey)
+            await recognize(image: direct, note: note)
             return
         }
 
@@ -118,6 +188,12 @@ final class ScanCoordinator: ObservableObject {
             say("这张图读不出来（可能还在 iCloud 里没下载完），过几秒再双击一次", keep: 12)
             return
         }
+        await recognize(image: image, note: nil)
+    }
+
+    /// 识别 + 入账。图进来之后的所有步骤都在这儿，两条来源（相册 / 接力文件）共用。
+    private func recognize(image: UIImage, note: String?) async {
+        // 先存档再识别：识别失败时图也在，用户还能回头看看是哪张认错了
         if ScanSettings.archiveImages {
             _ = ScanArchive.save(image)
         }
@@ -136,12 +212,22 @@ final class ScanCoordinator: ObservableObject {
 
         var rec = bill.toRecord(source: "intent")
         rec.book = ScanSettings.resolvedBook()
+        if let note, !note.isEmpty { rec.note = note }
         if rec.member.isEmpty { rec.member = LedgerStore.shared.selfMemberId }
         let saved = LedgerStore.shared.add(rec)
         SyncEngine.shared.now()
 
         pendingRecordIds.append(saved.id)
         say("已记账 · \(saved.category) \(Money.currency(saved.amount))，点一下能改", keep: 10)
+    }
+
+    /// 快捷指令「认这张图」写到沙盒的接力文件。取走即删。
+    private static func takeRelayImage() -> UIImage? {
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let url = dir.appendingPathComponent("incoming-scan.jpg")
+        guard let data = try? Data(contentsOf: url), let img = UIImage(data: data) else { return nil }
+        try? FileManager.default.removeItem(at: url)
+        return img
     }
 
     // MARK: 提示

@@ -128,47 +128,34 @@ struct AddRecordFromImageIntent: AppIntent {
         Summary("把 \(\.$image) 记进账本")
     }
 
-    @MainActor
-    func perform() async throws -> some IntentResult & ProvidesDialog {
-        // IntentFile.data 是非可选的 Data（不是 Data?），所以不能写 guard let。
-        guard let ui = UIImage(data: image.data) else {
-            return .result(dialog: IntentDialog(stringLiteral: "这张图读不出来"))
+    func perform() async throws -> some IntentResult {
+        // 和零参数版同一个道理：perform 可能在独立进程里跑，
+        // 在那儿识别、写库会随进程回收蒸发，还会和前台 App 的数据库互相覆盖。
+        // 所以这里只把图写进沙盒接力文件（同一 App 共享容器），敲一下门就走。
+        // 真正的识别由前台 ScanCoordinator 接手（它优先读这个接力文件）。
+        do {
+            let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            let url = dir.appendingPathComponent("incoming-scan.jpg")
+            try? FileManager.default.removeItem(at: url)
+            try image.data.write(to: url, options: .atomic)
+        } catch {
+            IntentReport.write("截图传不过来（\(error.localizedDescription)），在 App 里手动选图试试。")
+            return .result()
         }
 
-        // 先存档再识别：识别失败时图也在，用户还能回头看看是哪张认错了
-        if ScanSettings.archiveImages {
-            ScanArchive.save(ui)
+        if let n = Self.meaningfulNote(note) {
+            UserDefaults.standard.set(n, forKey: "snap.relay.note")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "snap.relay.note")
         }
 
-        let text = await withCheckedContinuation { (cont: CheckedContinuation<String, Never>) in
-            DispatchQueue.global(qos: .userInitiated).async {
-                cont.resume(returning: TextOCR.recognize(ui))
-            }
-        }
-        guard !text.isEmpty else {
-            return .result(dialog: IntentDialog(stringLiteral: "图里没读到文字"))
+        let auth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if auth == .denied || auth == .restricted {
+            IntentReport.write("相册权限被关掉了。到 iOS 设置 → 家庭记账 → 照片 → 改成「完全访问」。")
         }
 
-        let bill = BillParser.analyze(text)
-        guard bill.amount > 0 else {
-            return .result(dialog: IntentDialog(stringLiteral: "读到了文字但没认出金额，可能需要手动改一下"))
-        }
-
-        var rec = bill.toRecord(source: "intent")
-        rec.book = ScanSettings.resolvedBook()
-        if let n = Self.meaningfulNote(note) { rec.note = n }
-
-        let saved = LedgerStore.shared.add(rec)
-        SyncEngine.shared.now()
-
-        let sign = bill.isIncome ? "收入" : "支出"
-        let who = bill.merchant.isEmpty ? bill.category : bill.merchant
-        let book = LedgerStore.shared.db.books.first { $0.id == saved.book }?.name ?? "家庭账本"
-        // 弹窗之外再留一笔回执：App 如果被系统直接拉到前台，聊天流里也要有这一条
-        IntentReport.write("快捷指令记的：\(sign) \(Money.currency(bill.amount)) · \(who)，已进「\(book)」",
-                           recordId: saved.id)
-        return .result(dialog: IntentDialog(stringLiteral:
-            "记好了：\(sign) \(Money.currency(bill.amount)) · \(who)（\(book)）"))
+        ScanPending.mark()
+        return .result()
     }
 
     /// "v2" / "V2.1" 这类纯版本标记丢掉，其余当备注
@@ -216,27 +203,29 @@ struct AddLatestScreenshotIntent: AppIntent {
 
     init() {}
 
-    @MainActor
-    func perform() async throws -> some IntentResult & ProvidesDialog {
-        // 双保险：一条直接干，一条留票兜底。
+    func perform() async throws -> some IntentResult {
+        // 这个动作自己什么都不做：不找图、不识别、更不碰数据库。
+        // 它只负责两件事 —— 把 App 拉到前台（openAppWhenRun），和敲一下门。
         //
-        // `openAppWhenRun = true` 的 Intent 就跑在 App 进程里，所以这里能直接摸到
-        // `ScanCoordinator` —— 读图、识别、入账全在它那儿，不经过任何视图。
-        // v0.9 把动作挂到 ChatView 的 onChange 上，App 冷启动时订阅还没注册，
-        // 于是「跳到 App 了、显示正在读、然后没有然后」。
+        // 为什么不在 perform 里直接调 ScanCoordinator（v1.0 就是这么干的）：
+        // perform 有可能被 iOS 放进独立进程执行，进程里的 async Task 会随
+        // perform 返回被回收 —— 识别刚开头就蒸发，表现就是「App 跳过来了，
+        // 卡在正在读，然后没有然后」。而且在独立进程里写账本文件，
+        // 会和前台 App 的内存数据库互相覆盖，是数据隐患。
         //
-        // 票据（ScanPending）留给另一种可能：Intent 被系统放进独立进程执行 ——
-        // 那边摸不到单例，只有 UserDefaults 能穿过去。
-        ScanPending.mark()
-        ScanCoordinator.shared.scanFromShortcut()
-
+        // 正确姿势：Intent 只留信号（UserDefaults 票据 + Darwin 跨进程广播），
+        // 由 App 进程里的 ScanCoordinator 接手 —— 那儿有完整生命周期，
+        // 数据库、UI、同步都在同一个进程里。
         let auth = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         if auth == .denied || auth == .restricted {
+            // 拒绝状态连门都不用敲，直接把原因带回去（聊天页的回执会显示这句）
             IntentReport.write("相册权限被关掉了。到 iOS 设置 → 家庭记账 → 照片 → 改成「完全访问」，再双击背面。")
-            return .result(dialog: IntentDialog(stringLiteral: "先去 iOS 设置里允许访问照片"))
+            ScanPending.mark()
+            return .result()
         }
 
-        return .result(dialog: IntentDialog(stringLiteral: "正在读刚截的那张图…"))
+        ScanPending.mark()
+        return .result()
     }
 }
 

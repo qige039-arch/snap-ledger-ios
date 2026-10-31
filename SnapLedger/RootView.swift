@@ -24,9 +24,10 @@ enum ScanPending {
 
     static func mark() {
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: key)
-        // `openAppWhenRun = true` 的顺序是「先起 App，再跑 perform」，
-        // 也就是说 RootView.onAppear / scenePhase 都已经过去了才打上这张票。
-        // 光靠 UserDefaults 会一直躺到下次切前台，所以同进程再喊一嗓子。
+        // perform 可能跑在独立进程里，进程内的 NotificationCenter 传不过去；
+        // Darwin 通知是系统级的，跨进程必达。App 侧由 ScanCoordinator 接收。
+        ScanSignal.post()
+        // 同进程的情况（perform 跑在主 App 进程里）再喊一嗓子，两条路任一命中即可
         NotificationCenter.default.post(name: .snapScanRequested, object: nil)
     }
 
@@ -94,11 +95,17 @@ struct RootView: View {
             }
         }
         .animation(.easeOut(duration: 0.2), value: scanner.banner)
-        .onAppear { consumeScanPending() }
+        .onAppear {
+            consumeScanPending()
+            scanner.armPolling()
+        }
         // App 已经在后台时被双击背面拉起，RootView 不会重建，onAppear 不会再来一次，
         // 所以还得盯着 scenePhase。
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { consumeScanPending() }
+            if phase == .active {
+                consumeScanPending()
+                scanner.armPolling()
+            }
         }
         // 同进程的通知：App 是先起来、Intent 后跑完，上面两个钩子都会错过
         .onReceive(NotificationCenter.default.publisher(for: .snapScanRequested)) { _ in
