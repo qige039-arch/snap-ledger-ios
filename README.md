@@ -11,9 +11,9 @@ PWA 版的「原生重做」。目标只有一个：**自己家两台 iPhone 用
 
 | 项 | 状态 |
 |---|---|
-| 云端编译（GitHub macOS runner） | ✅ 通过，v0.9 见 `run 41184225852`；v1.0 见下方 |
+| 云端编译（GitHub macOS runner） | ✅ 通过，`run 41190492079`（v1.0 常驻执行器版） |
 | 解析 + 导入回归用例 | ✅ 全绿（36 条，0 失败） |
-| 未签名 ipa | ✅ 已产出，752 KB，在 `dist/SnapLedger-unsigned.ipa` |
+| 未签名 ipa | ✅ 已产出，763 KB，在 `dist/SnapLedger-unsigned.ipa` |
 | App Intents 是否真进包 | ✅ ipa 里有 `Metadata.appintents/`，说明快捷指令动作会被系统识别 |
 | App 图标 | ✅ 已生成，`AppIcon60x60@2x.png` 在包里 |
 | **真机安装** | ⬜ 待你在 Windows 上跑 Sideloadly |
