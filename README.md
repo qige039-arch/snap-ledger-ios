@@ -11,7 +11,7 @@ PWA 版的「原生重做」。目标只有一个：**自己家两台 iPhone 用
 
 | 项 | 状态 |
 |---|---|
-| 云端编译（GitHub macOS runner） | ✅ 通过，`run 41190492079`（v1.0 常驻执行器版） |
+| 云端编译（GitHub macOS runner） | ✅ 通过，`run 41194781546`（v1.1 Intent 只敲门版） |
 | 解析 + 导入回归用例 | ✅ 全绿（36 条，0 失败） |
 | 未签名 ipa | ✅ 已产出，763 KB，在 `dist/SnapLedger-unsigned.ipa` |
 | App Intents 是否真进包 | ✅ ipa 里有 `Metadata.appintents/`，说明快捷指令动作会被系统识别 |
@@ -64,15 +64,16 @@ v1.1 的原则：**Intent 只敲门，App 进程干活**。
 ```
 perform（无论跑在哪个进程）
    ├ 相册权限被拒 → 写回执，结束
-   └ ScanPending.mark()
-        ├ UserDefaults 票据
-        ├ Darwin 通知（系统级，跨进程必达）
-        └ 进程内 NotificationCenter（perform 恰好跑在主 App 进程时走这条）
-App 进程的 ScanCoordinator（常驻单例，init 时就挂好 Darwin 监听）
-   ├ 收到信号 → 取票 → scanFromShortcut
-   ├ App 回到前台后 10 秒内轮询票据（每 0.4s）—— 信号在挂载前发出也能兜住
+   └ ScanPending.mark()：UserDefaults 票据 + 进程内通知
+App 进程的 ScanCoordinator（常驻单例）
+   ├ App 回到前台的 30 秒里轮询票据（每 0.6s）—— mark 与 active 谁先谁后都接得住
    └ 找图 → 读图（12s 超时）→ OCR → 入账 → 同步
 ```
+
+> 尝试过 Darwin 通知（CFNotificationCenter）做跨进程广播，Xcode 26 的 Swift 里
+> 这组 API 不可见（`Cannot find 'CFNotificationCenterGetDarwinNotificationCenter' in scope`，
+> 补 `import CoreFoundation` 也没用），弃用。纯轮询同样可靠，代价是 30 秒窗口内
+> 每 0.6 秒读一次 UserDefaults，微秒级，可忽略。
 
 「认这张图」（带图版）同样处理：图片写到沙盒接力文件 `Documents/incoming-scan.jpg`
 （同一 App 共享容器），备注写 UserDefaults，然后 mark。ScanCoordinator 优先读
