@@ -24,6 +24,8 @@
 
 import SwiftUI
 import Photos
+// Darwin 通知（CFNotificationCenter）在 CoreFoundation 里，SwiftUI 不会间接带上
+import CoreFoundation
 
 
 // MARK: - 跨进程叫门
