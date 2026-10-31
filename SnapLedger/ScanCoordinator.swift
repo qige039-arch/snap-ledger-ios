@@ -55,6 +55,9 @@ final class ScanCoordinator: ObservableObject {
     private static let relayNoteKey = "snap.relay.note"
 
     private var busy = false
+    /// 正在读的时候又来一次请求（背面双击经常连发）：记下来，
+    /// 这一趟读完补跑一次。直接丢掉的话，用户眼里就是「双击了没反应」。
+    private var rerunPending = false
     private var lastStart = Date.distantPast
     private var bannerTask: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
@@ -110,13 +113,24 @@ final class ScanCoordinator: ObservableObject {
 
     private func scan(window: TimeInterval, force: Bool, fromShortcut: Bool) async {
         // 一次双击会从两条路进来（进程内通知 + 票据轮询），
-        // 所以两头都堵：正在跑就返回；同一瞬间的重复请求也丢掉。
-        if busy { return }
+        // 连发两下也会进来两次。正在跑就先记一笔，读完补跑一次 ——
+        // 不能把后来者直接丢掉：丢掉的那趟在用户眼里就是「白双击了」。
+        if busy {
+            if fromShortcut { rerunPending = true }
+            return
+        }
         if fromShortcut, Date().timeIntervalSince(lastStart) < 2 { return }
         busy = true
         lastStart = Date()
-        defer { busy = false }
+        await doScan(window: window, force: force, fromShortcut: fromShortcut)
+        busy = false
+        if rerunPending {
+            rerunPending = false
+            await doScan(window: 1800, force: false, fromShortcut: true)
+        }
+    }
 
+    private func doScan(window: TimeInterval, force: Bool, fromShortcut: Bool) async {
         say("正在找刚截的那张图…", keep: 40)
 
         let auth = await ScreenshotWatcher.ensurePhotoAccess()
@@ -125,8 +139,9 @@ final class ScanCoordinator: ObservableObject {
             return
         }
 
-        // 快捷指令「认这张图」递进来的图优先 —— 它不在相册里，按相册找会扑空
-        if let direct = Self.takeRelayImage() {
+        // 快捷指令「认这张图」递进来的图优先 —— 它不在相册里，按相册找会扑空。
+        // 文件在但一时读不出（正在被写）时这里会等，不会急着掉进相册查询。
+        if let direct = await Self.takeRelayImage() {
             let note = UserDefaults.standard.string(forKey: Self.relayNoteKey)
             UserDefaults.standard.removeObject(forKey: Self.relayNoteKey)
             await recognize(image: direct, note: note)
@@ -147,7 +162,13 @@ final class ScanCoordinator: ObservableObject {
             try? await Task.sleep(nanoseconds: 600_000_000)
         }
         guard let asset else {
-            say(ScreenshotWatcher.noShotHint(seconds: window, auth: auth), keep: 14)
+            // 接力文件还在却没读到（或读坏了）时，别拿相册的旧图说事 ——
+            // 用户明明把图递进来了，提示却让他去检查相册，会把他带沟里。
+            if Self.relayFileExists() {
+                say("图已经递进来了，但没读出来。再双击一次；或点左下角相册按钮手动选", keep: 14)
+            } else {
+                say(ScreenshotWatcher.noShotHint(seconds: window, auth: auth), keep: 14)
+            }
             return
         }
 
@@ -224,12 +245,32 @@ final class ScanCoordinator: ObservableObject {
     }
 
     /// 快捷指令「认这张图」写到沙盒的接力文件。取走即删。
-    private static func takeRelayImage() -> UIImage? {
+    ///
+    /// 读不到分两种情况，处理完全不同：
+    /// 1. 文件真不存在（这次快捷指令没递图，或递图的动作没跑）→ 返回 nil，走相册那条路；
+    /// 2. 文件在、但恰好撞上 perform「删旧写新」的空档，或者写到一半 →
+    ///    重试几轮再下结论。20:09 那次「相册里最新一张是 2 小时前的」误报
+    ///    就是第 2 种：图明明递到了，读的一瞬文件正好不在，掉进相册查询，
+    ///    相册里又只有旧图，用户被提示带去检查相册 —— 根因根本不在相册。
+    private static func takeRelayImage() async -> UIImage? {
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let url = dir.appendingPathComponent("incoming-scan.jpg")
-        guard let data = try? Data(contentsOf: url), let img = UIImage(data: data) else { return nil }
-        try? FileManager.default.removeItem(at: url)
-        return img
+        for attempt in 0..<6 {
+            if let data = try? Data(contentsOf: url), let img = UIImage(data: data) {
+                try? FileManager.default.removeItem(at: url)
+                return img
+            }
+            // 文件压根没有，不用等；文件在但读不出，等一拍再试（写入是毫秒级）
+            if !FileManager.default.fileExists(atPath: url.path) { return nil }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+        return nil
+    }
+
+    /// 接力文件是否还在（读失败时给针对性提示用）
+    private static func relayFileExists() -> Bool {
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return FileManager.default.fileExists(atPath: dir.appendingPathComponent("incoming-scan.jpg").path)
     }
 
     // MARK: 提示
