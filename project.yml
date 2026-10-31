@@ -55,8 +55,11 @@ targets:
       path: Info.plist
       properties:
         CFBundleDisplayName: 家庭记账
-        CFBundleShortVersionString: "1.2"
-        CFBundleVersion: "12"
+        # 必须引用 build settings，不能写死数字。
+        # 写死过一次：MARKETING_VERSION 从 1.2 一路改到 1.4，这里的字面量没跟着动，
+        # 编出来的包 Info.plist 永远是 1.2 (12) —— 手机上、Sideloadly 里都看不出换了版本。
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         # 少了 UILaunchScreen，iOS 会用兼容模式跑，界面变小、有黑边
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
@@ -77,7 +80,7 @@ targets:
         PRODUCT_NAME: SnapLedger
         TARGETED_DEVICE_FAMILY: "1"
         MARKETING_VERSION: "1.4"
-        CURRENT_PROJECT_VERSION: "14"
+        CURRENT_PROJECT_VERSION: "15"
         # 不加这一行，Assets 里的图标不会被编译进 App，装到手机上是白图标
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
 
