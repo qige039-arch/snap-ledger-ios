@@ -64,6 +64,53 @@ final class ScanCoordinator: ObservableObject {
 
     private init() {}
 
+    // MARK: 诊断回执
+    //
+    // 链路上任何一环断了，用户只看到一句提示、几秒就消失，隔着微信远端排查
+    // 只能靠猜。把「最近一次识别」落到 UserDefaults，「我的」页常驻显示一行 ——
+    // 用户截个「我的」页，断点在哪一环一眼可见。
+    //
+    // 为什么用 UserDefaults 而不是内存：识别失败后 App 可能被杀掉重开，
+    // 内存里的东西活不到用户来看的那一刻。
+
+    private static let diagKey = "snap.diag.last"
+    private static let relayStatKey = "snap.relay.stat"
+
+    /// perform（可能在非主线程上下文）也会写，标 nonisolated；UserDefaults 本身线程安全
+    nonisolated static func recordDiag(source: String, result: String) {
+        UserDefaults.standard.set(
+            ["ts": Date().timeIntervalSince1970, "source": source, "result": result],
+            forKey: diagKey)
+    }
+
+    /// 快捷指令那边递图的存根（大小 + 时间）。用于分辨「根本没递」
+    /// 和「递了但 App 没接到」—— 后者是沙盒/进程层的异常，提示语完全不同。
+    nonisolated static func noteRelayStat(bytes: Int) {
+        UserDefaults.standard.set(
+            ["ts": Date().timeIntervalSince1970, "kb": max(1, bytes / 1024)],
+            forKey: relayStatKey)
+    }
+
+    /// 「我的」页诊断行用的文案；没诊断过就返回 nil（不占行）
+    nonisolated static var diagText: String? {
+        guard let d = UserDefaults.standard.dictionary(forKey: diagKey),
+              let ts = d["ts"] as? Double,
+              let source = d["source"] as? String,
+              let result = d["result"] as? String else { return nil }
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        let t = "\(f.string(from: Date(timeIntervalSince1970: ts)))"
+        return "\(t) · \(source) · \(result)"
+    }
+
+    private static func relayStatFresh() -> (kb: Int, age: TimeInterval)? {
+        guard let d = UserDefaults.standard.dictionary(forKey: relayStatKey),
+              let ts = d["ts"] as? Double,
+              let kb = d["kb"] as? Int else { return nil }
+        let age = Date().timeIntervalSince1970 - ts
+        return age < 120 ? (kb, age) : nil
+    }
+
     /// 票据轮询的统一落点
     func consumeSignal() {
         guard ScanPending.takeIfFresh() else { return }
@@ -140,7 +187,9 @@ final class ScanCoordinator: ObservableObject {
         if let direct = await Self.takeRelayImage() {
             let note = UserDefaults.standard.string(forKey: Self.relayNoteKey)
             UserDefaults.standard.removeObject(forKey: Self.relayNoteKey)
-            await recognize(image: direct, note: note)
+            say("已收到截图，正在认…", keep: 40)
+            Self.recordDiag(source: "直传图", result: "已收到，识别中")
+            await recognize(image: direct, note: note, source: "直传图")
             return
         }
 
@@ -149,6 +198,7 @@ final class ScanCoordinator: ObservableObject {
         guard auth == .authorized || auth == .limited else {
             // 图没递进来时这里最容易误伤：用户在「认这张图」路线下本来就不需要相册，
             // 所以先把「检查快捷指令参数」放在前面说，别一上来就让人去改权限。
+            Self.recordDiag(source: "相册", result: "没有照片权限")
             say("没收到直传的图。快捷指令是「截取屏幕 → 认这张图」的话，检查「截图」参数有没有连上截屏结果；要走相册路线才需要照片权限——到设置里选「完全访问」", keep: 16)
             return
         }
@@ -170,8 +220,15 @@ final class ScanCoordinator: ObservableObject {
             // 接力文件还在却没读到（或读坏了）时，别拿相册的旧图说事 ——
             // 用户明明把图递进来了，提示却让他去检查相册，会把他带沟里。
             if Self.relayFileExists() {
+                Self.recordDiag(source: "直传图", result: "文件在但没读到")
                 say("图已经递进来了，但没读出来。再双击一次；或点左下角相册按钮手动选", keep: 14)
+            } else if let st = Self.relayStatFresh() {
+                // 快捷指令那边说递了、App 这边没有 —— 进程/沙盒层出问题了，
+                // 和「参数没连上」是两回事，提示必须分开。
+                Self.recordDiag(source: "直传图", result: "快捷指令称已递 \(st.kb)KB 但 App 没接到")
+                say("快捷指令刚递了张图，但 App 这边没接到。再双击一次；还不行把「我的」页的「上次识别」截图发我", keep: 20)
             } else {
+                Self.recordDiag(source: "没图", result: "直传和相册都没等到图")
                 say(ScreenshotWatcher.noShotHint(seconds: window, auth: auth), keep: 14)
             }
             return
@@ -194,7 +251,7 @@ final class ScanCoordinator: ObservableObject {
     }
 
     /// 识别 + 入账。图进来之后的所有步骤都在这儿，两条来源（相册 / 接力文件）共用。
-    private func recognize(image: UIImage, note: String?, force: Bool = false) async {
+    private func recognize(image: UIImage, note: String?, force: Bool = false, source: String = "相册") async {
         // 指纹去重：连着双击两次、或者两条入口同时到，同一张图只记一次。
         // 相册那条路有 asset id 去重，但接力文件这条路没有 id 可对 ——
         // 用户截图里那两笔一模一样的 -¥31 就是这么来的。
@@ -202,6 +259,7 @@ final class ScanCoordinator: ObservableObject {
         if !force, let fp,
            UserDefaults.standard.string(forKey: Self.fingerprintKey) == fp,
            Date().timeIntervalSince1970 - UserDefaults.standard.double(forKey: Self.fingerprintTsKey) < 300 {
+            Self.recordDiag(source: source, result: "同一张图刚记过，跳过")
             say("这张图刚才已经记过了", keep: 8)
             return
         }
@@ -212,12 +270,14 @@ final class ScanCoordinator: ObservableObject {
         }
         let text = await ScreenshotWatcher.recognizeOffMain(image)
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            Self.recordDiag(source: source, result: "图里没读到文字")
             say("这张图里没读到文字。确认是付款/账单页再试，也可以点左下角相册按钮手动选", keep: 14)
             return
         }
 
         let bill = BillParser.analyze(text)
         guard bill.amount > 0 else {
+            Self.recordDiag(source: source, result: "读到文字但没认出金额")
             say("文字读到了，但没认出金额（可能是余额页或不常见的版式）。手动说一句「午饭 32」更快", keep: 14)
             return
         }
@@ -234,6 +294,7 @@ final class ScanCoordinator: ObservableObject {
         ScanArchive.saveChatShot(image, recordId: saved.id)
 
         pendingRecordIds.append(saved.id)
+        Self.recordDiag(source: source, result: "已记账 \(Money.currency(saved.amount))")
         if let fp {
             UserDefaults.standard.set(fp, forKey: Self.fingerprintKey)
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.fingerprintTsKey)

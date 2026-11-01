@@ -428,6 +428,21 @@ struct MeView: View {
                 }
             }
 
+            // 上次识别走到哪一步、断在哪一环，常驻可见 —— 远端排查不用再靠猜
+            if let diag = ScanCoordinator.diagText {
+                HStack(alignment: .top) {
+                    Text("上次识别")
+                        .font(.system(size: 13.5))
+                        .foregroundStyle(Theme.ink)
+                    Spacer()
+                    Text(diag)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(Theme.ink2)
+                        .multilineTextAlignment(.trailing)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             Button {
                 // 走 ScanCoordinator：它不依赖聊天页有没有挂载，识别的结果直接入账，
                 // 进度和原因也一并回传（这里和记账页同时能看到）。

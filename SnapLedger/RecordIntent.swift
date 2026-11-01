@@ -138,7 +138,15 @@ struct AddRecordFromImageIntent: AppIntent {
             let url = dir.appendingPathComponent("incoming-scan.jpg")
             try? FileManager.default.removeItem(at: url)
             try image.data.write(to: url, options: .atomic)
+
+            // 留个存根 + 回执。之前「图到底递没递进来」全靠猜：App 端看不到
+            // 快捷指令干了什么，用户端看不到任何反馈。现在递图成功也说话 ——
+            // 聊天流里出现这句、而 App 又说没收到图，就能断定是中间环节断了。
+            ScanCoordinator.noteRelayStat(bytes: image.data.count)
+            let kb = max(1, image.data.count / 1024)
+            IntentReport.write("截图（\(kb) KB）已经递进 App，正在认。")
         } catch {
+            ScanCoordinator.recordDiag(source: "直传图", result: "快捷指令写图失败：\(error.localizedDescription)")
             IntentReport.write("截图传不过来（\(error.localizedDescription)），在 App 里手动选图试试。")
             return .result()
         }

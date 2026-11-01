@@ -65,6 +65,9 @@ struct ChatView: View {
     @State private var pickerItem: PhotosPickerItem?
     @State private var undoRecord: LedgerRecord?
     @State private var undoTimer: Task<Void, Never>?
+    /// 回执轮询：Intent 的 perform 在 App 变 active **之后**才跑，
+    /// 它写的回执晚于 onAppear / scenePhase 这两个钩子。开个 30 秒的短轮询接住。
+    @State private var receiptTask: Task<Void, Never>?
     @FocusState private var inputFocused: Bool
 
     private var monthTotals: (income: Double, expense: Double) {
@@ -134,10 +137,25 @@ struct ChatView: View {
         .onChange(of: scanner.pendingRecordIds) { _, _ in
             adoptScanResults()
         }
-        // 回前台时把快捷指令留下的回执补进聊天流：App 是被系统拉起来的，
-        // 光靠界面状态用户可能错过那一句。
+        // 回前台后持续接快捷指令的回执：openAppWhenRun 的顺序是「先起 App、再跑 perform」，
+        // 回执写在 active 之后 —— 只在 onChange 里 flush 一次接不住，得轮一段时间。
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { flushIntentReport() }
+            if phase == .active {
+                flushIntentReport()
+                receiptTask?.cancel()
+                receiptTask = Task {
+                    for _ in 0..<50 {
+                        try? await Task.sleep(nanoseconds: 600_000_000)
+                        guard !Task.isCancelled else { return }
+                        flushIntentReport()
+                    }
+                }
+            } else {
+                receiptTask?.cancel()
+            }
+        }
+        .onDisappear {
+            receiptTask?.cancel()
         }
         .onChange(of: watcher.incoming) { _, text in
             guard let t = text else { return }
