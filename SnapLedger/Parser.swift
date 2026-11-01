@@ -205,7 +205,7 @@ enum BillParser {
             push(m, 1, 58, "line")
         }
 
-        if cands.isEmpty { return (0, 0, []) }
+        if cands.isEmpty { return (0, 0, [], "") }
 
         // 上下文校正
         for i in cands.indices {
