@@ -617,7 +617,7 @@ struct RecordLine: View {
                     Text("·")
                     Text(record.member.isEmpty ? "我" : memberName)
                     Text("·")
-                    Text(Fmt.hm(record.ts))
+                    Text(Fmt.hmOrDate(record.ts))
                 }
                 .font(.system(size: 11.5))
                 .foregroundStyle(Theme.ink3)

@@ -30,6 +30,7 @@ struct ParsedBill {
     var emoji: String
     var ts: Double                // 毫秒
     var method: String
+    var note: String = ""
     var member: String
     var confidence: Int
     var lines: [String]
@@ -44,6 +45,7 @@ struct ParsedBill {
                      emoji: emoji,
                      merchant: merchant,
                      method: method,
+                     note: note,
                      member: member,
                      source: source)
     }
@@ -283,10 +285,13 @@ enum BillParser {
             }
         }
 
-        // 2) 前 3 行里第一个像名字的短行（支付截图的标题位置）
+        // 2) 前 3 行里第一个像名字的短行（支付截图的标题位置）。
+        //    截图 OCR 的头几行经常是状态栏碎片（时间、信号、「！.4G0」这种），
+        //    只挡纯数字符号挡不住它 —— 必须要求「像名字」。
         for i in 0..<min(lines.count, 3) {
             let L = lines[i].trimmingCharacters(in: .whitespaces)
             if L.count >= 2, L.count <= 20,
+               looksLikeName(L),
                !has("^[\\d\\s.,:：¥￥\\-−+/]+$", L),
                !has(skipLine, L) {
                 return tidy(L)
@@ -310,9 +315,38 @@ enum BillParser {
             if L.count < 2 || L.count > 26 { continue }
             if has("^[\\d\\s.,:：¥￥\\-−+/]+$", L) { continue }
             if has(skipLine, L) { continue }
+            if !looksLikeName(L) { continue }
             if has(merchantHint, L), L.count > bestLine.count { bestLine = L }
         }
         return bestLine.isEmpty ? "" : tidy(bestLine)
+    }
+
+    /// OCR 行是否「像商户名」。状态栏垃圾（！.4G0、11:16、HD、5G）和纯符号行必须挡掉：
+    /// 含中文的行基本可信；纯拉丁/数字的短行（<5 个字母）一律当碎片，
+    /// 长的才可能是商户（Starbucks、IKEA 这类）。
+    static func looksLikeName(_ raw: String) -> Bool {
+        var L = raw.trimmingCharacters(in: .whitespaces)
+        L = L.replacingOccurrences(of: "^[！!。，,．.·•|:：\\-—_\\s]+", with: "", options: .regularExpression)
+        L = L.replacingOccurrences(of: "[！!。，,．.·•|:：\\-—_\\s]+$", with: "", options: .regularExpression)
+        if L.count < 2 { return false }
+        if L.range(of: "[\\x{4e00}-\\x{9fa5}]", options: .regularExpression) != nil { return true }
+        let letters = L.filter { $0.isLetter }.count
+        return letters >= 5
+    }
+
+    /// 「商品 / 订单信息 / 备注」这类字段抓出来做备忘 —— 账单截图里现成写着，
+    /// 不抓白不抓。没有就返回空串。
+    static func detectNote(_ lines: [String]) -> String {
+        let keys = ["商品说明", "订单信息", "商品", "备注", "说明"]
+        for L in lines {
+            for k in keys where L.hasPrefix(k) {
+                let rest = L.dropFirst(k.count)
+                guard let first = rest.first, first == "：" || first == ":" || first == " " else { continue }
+                let s = String(rest).trimmingCharacters(in: CharacterSet(charactersIn: "：: "))
+                if s.count >= 2, s.count <= 40, !has(skipLine, s) { return s }
+            }
+        }
+        return ""
     }
 
     private static func tidy(_ s: String) -> String {
@@ -432,6 +466,7 @@ enum BillParser {
         let cat = detectCategory(text + " " + merchant, type: type)
         let ts = detectDate(text)
         let method = detectMethod(text)
+        let note = detectNote(lines)
 
         var conf = 0
         if amt.amount > 0 {
@@ -449,6 +484,7 @@ enum BillParser {
                           emoji: cat.emoji,
                           ts: ts,
                           method: method,
+                          note: note,
                           member: "",
                           confidence: conf,
                           lines: lines)

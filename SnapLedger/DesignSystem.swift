@@ -497,6 +497,20 @@ enum Fmt {
         fHM.string(from: Date(timeIntervalSince1970: ms / 1000))
     }
 
+    static func md(_ ms: Double) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "M-d"
+        return f.string(from: Date(timeIntervalSince1970: ms / 1000))
+    }
+
+    /// 今天给 HH:mm，跨天给「M-d HH:mm」。
+    /// 截图记账按账单支付时间入账，昨天/前天的账单记进去后，
+    /// 只显示 HH:mm 用户会以为「记丢了」—— 账本里翻不到今天。
+    static func hmOrDate(_ ms: Double) -> String {
+        let d = Date(timeIntervalSince1970: ms / 1000)
+        return Calendar.current.isDateInToday(d) ? fHM.string(from: d) : mdhm(ms)
+    }
+
     static func mdhm(_ ms: Double) -> String {
         fMDHM.string(from: Date(timeIntervalSince1970: ms / 1000))
     }

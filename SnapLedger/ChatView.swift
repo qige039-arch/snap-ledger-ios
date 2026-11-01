@@ -380,6 +380,11 @@ struct ChatView: View {
                     .padding(.horizontal, 12)
                     .cardStyle(padding: 0, radius: 14)
                     .padding(.horizontal, 16)
+                    .contextMenu {
+                        Button(role: .destructive) { remove(r) } label: {
+                            Label("删除这笔账", systemImage: "trash")
+                        }
+                    }
             }
 
         case .shot(_, let rid):
@@ -637,6 +642,14 @@ struct ChatView: View {
 
     private func remove(_ r: LedgerRecord) {
         store.delete(id: r.id)
+        // 缩略图跟着账走：账删了，聊天里不该剩一张点开是空的孤儿图
+        ScanArchive.removeChatShot(recordId: r.id)
+        withAnimation {
+            items.removeAll { item in
+                if case .shot(_, let rid) = item { return rid == r.id }
+                return false
+            }
+        }
         withAnimation(.easeOut(duration: 0.2)) { undoRecord = r }
         undoTimer?.cancel()
         undoTimer = Task {
@@ -877,6 +890,7 @@ struct AllRecordsSheet: View {
 
     private func remove(_ r: LedgerRecord) {
         store.delete(id: r.id)
+        ScanArchive.removeChatShot(recordId: r.id)
         withAnimation(.easeOut(duration: 0.2)) { undoRecord = r }
         undoTimer?.cancel()
         undoTimer = Task {

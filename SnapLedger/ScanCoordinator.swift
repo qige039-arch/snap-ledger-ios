@@ -299,7 +299,12 @@ final class ScanCoordinator: ObservableObject {
             UserDefaults.standard.set(fp, forKey: Self.fingerprintKey)
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.fingerprintTsKey)
         }
-        say("已记账 · \(saved.category) \(Money.currency(saved.amount))，点一下能改", keep: 10)
+        // 非今天的账单（按支付时间入账）必须点明记在了哪天，
+        // 否则用户在账本「今天」里翻不到，会以为没记上。
+        let sameDay = Calendar.current.isDateInToday(Date(timeIntervalSince1970: saved.ts / 1000))
+        say(sameDay
+            ? "已记账 · \(saved.category) \(Money.currency(saved.amount))，点一下能改，长按或左滑可删"
+            : "已记账 · \(Money.currency(saved.amount)) · 按账单时间记在 \(Fmt.md(saved.ts))，账本翻到那天能看到", keep: 12)
     }
 
     private static let fingerprintKey = "snap.scan.fp"

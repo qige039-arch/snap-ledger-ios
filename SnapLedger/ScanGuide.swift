@@ -182,6 +182,16 @@ enum ScanArchive {
         return UIImage(data: data)
     }
 
+    /// 账删了，聊天里的缩略图也一起收走（文件 + 映射都清）。
+    static func removeChatShot(recordId: String) {
+        let map = UserDefaults.standard.dictionary(forKey: chatMapKey) as? [String: String] ?? [:]
+        guard let name = map[recordId] else { return }
+        try? FileManager.default.removeItem(at: chatDir.appendingPathComponent(name))
+        var m = map
+        m.removeValue(forKey: recordId)
+        UserDefaults.standard.set(m, forKey: chatMapKey)
+    }
+
     /// 只留最近 chatKeep 张：按修改时间排序，超出的删文件 + 摘映射。
     /// 一张 120KB，60 张约 7MB，留一年也不会撑爆。
     private static func pruneChatShots() {
