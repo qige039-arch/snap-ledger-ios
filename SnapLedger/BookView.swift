@@ -574,6 +574,15 @@ struct RecordLine: View {
         .onDisappear {
             if rowState.openId == record.id { rowState.openId = nil }
         }
+        // 长按删除：左滑是手势，滑不出来就没辙了；长按菜单是第二入口，
+        // 在账本、全部记录、聊天流三处都能用。
+        .contextMenu {
+            if let del = onDelete {
+                Button(role: .destructive, action: del) {
+                    Label("删除这笔账", systemImage: "trash")
+                }
+            }
+        }
     }
 
     /// 行本身不再用 Button
@@ -582,10 +591,14 @@ struct RecordLine: View {
     /// 打开编辑器」—— Button 的 tap 和拖动手势会同时被识别。换成 onTapGesture 后，
     /// 拖动一旦超过 minimumDistance，tap 就自动失败，两者不会再同时成立。
     private var rowContent: some View {
+        // 顺序不能反：先 contentShape 定热区，再 offset 位移 ——
+        // 热区会跟着一起挪。以前是「先 offset 再 contentShape」，热区留在原位
+        // （offset 不改布局框），滑出来的红色删除块正好被这一行的热区盖住，
+        // 点下去落到 onTapGesture 上，表现就是「左滑出来了、点了却删不掉」。
         let core = rowInner
             .background(Theme.card)
-            .offset(x: dx)
             .contentShape(Rectangle())
+            .offset(x: dx)
 
         return Group {
             if onDelete == nil {

@@ -65,7 +65,7 @@ enum BillParser {
         BillCategory(name: "娱乐", emoji: "🎬", keywords: ["电影", "影院", "影城", "ktv", "游戏", "steam", "演出", "演唱会", "门票", "景区", "旅游", "酒店", "民宿", "会员", "订阅", "音乐", "网易云", "qq音乐", "爱奇艺", "腾讯视频", "优酷", "b站", "哔哩哔哩", "健身", "球", "游泳", "剧本杀", "密室", "桌游"]),
         BillCategory(name: "医疗", emoji: "💊", keywords: ["医院", "诊所", "药", "药店", "大药房", "体检", "牙科", "口腔", "挂号", "门诊", "急诊", "医疗", "医保", "眼科", "中医", "保健"]),
         BillCategory(name: "居住", emoji: "🏠", keywords: ["房租", "租金", "物业", "水费", "电费", "燃气", "暖气", "宽带", "家政", "保洁", "维修", "装修", "家具", "房贷"]),
-        BillCategory(name: "通讯", emoji: "📱", keywords: ["话费", "流量", "中国移动", "中国联通", "中国电信", "充值话费", "宽带费", "手机费"]),
+        BillCategory(name: "通讯", emoji: "📱", keywords: ["话费", "流量", "中国移动", "中国联通", "中国电信", "移动营业厅", "联通", "电信", "营业厅", "宽带费", "手机费", "话费充值", "充话费", "通信"]),
         BillCategory(name: "学习", emoji: "📚", keywords: ["书店", "图书", "当当", "课程", "培训", "学费", "教育", "得到", "知识星球", "网课", "考试", "报名费", "文具", "打印"]),
         BillCategory(name: "人情", emoji: "🎁", keywords: ["红包", "礼金", "礼物", "请客", "转账给", "捐赠", "公益", "份子"]),
         BillCategory(name: "宠物", emoji: "🐾", keywords: ["宠物", "猫粮", "狗粮", "猫砂", "宠物医院", "洗澡", "驱虫", "疫苗"]),
@@ -139,7 +139,13 @@ enum BillParser {
         var rawLen: Int
     }
 
-    static func extractAmount(_ text: String) -> (amount: Double, weight: Double, candidates: [Double]) {
+    // MARK: - 金额
+
+    /// 两档金额关键词，extractAmount 内部和 analyze 的优惠校正共用一份，避免走偏
+    static let finalKwInline = "(实付|实际支付|实际付款|付款金额|支付金额|交易金额|本次消费|支出金额|消费金额|应付金额)"
+    static let grossKwInline = "(订单金额|商品金额|商品总额|原价|总价)"
+
+    static func extractAmount(_ text: String) -> (amount: Double, weight: Double, candidates: [Double], kind: String) {
         let flat = text.replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
         let s = flat as NSString
         var cands: [AmountHit] = []
@@ -154,11 +160,21 @@ enum BillParser {
         }
 
         // 1) 强句式。禁止跨行 —— 否则「支付成功\n支付时间 2026年」会把年份当金额
-        let kwPattern = "(实付|实际支付|实际付款|付款金额|支付金额|交易金额|订单金额|消费金额|合计|总计|总额|应付|应收|支付成功|成功付款|本次消费|支出金额|收款|到账|入账)[^\\d\\-−¥￥\\n]{0,10}[-−]?[ \\t]*[¥￥]?[ \\t]*([\\d,]+(?:\\.\\d{1,2})?)"
-        for m in all(kwPattern, s) {
-            let kw = sub(m, 1, s)
-            let w: Double = (kw.contains("收款") || kw.contains("到账") || kw.contains("入账")) ? 95 : 100
-            push(m, 2, w, kw)
+        //
+        // 分三档。账单里常常同时出现好几个数，混在一档就会选错：
+        //   · 实付 / 付款金额 / 支付金额 = 真正花出去的钱（最高档）
+        //   · 订单金额 / 原价 / 合计      = 优惠前的数，当成主金额会多记（84.00 对 实付 82.55）
+        //   · 收款 / 到账 / 入账          = 银行短信的方向词
+        let finalKw = "(实付|实际支付|实际付款|付款金额|支付金额|交易金额|本次消费|支出金额|消费金额|应付金额|支付成功|成功付款)"
+        let grossKw = "(订单金额|商品金额|商品总额|原价|总价|合计|总计|总额|应付|应收)"
+        for m in all("\(finalKw)[^\\d\\-−¥￥\\n]{0,10}[-−]?[ \\t]*[¥￥]?[ \\t]*([\\d,]+(?:\\.\\d{1,2})?)", s) {
+            push(m, 2, 120, sub(m, 1, s))
+        }
+        for m in all("\(grossKw)[^\\d\\-−¥￥\\n]{0,10}[-−]?[ \\t]*[¥￥]?[ \\t]*([\\d,]+(?:\\.\\d{1,2})?)", s) {
+            push(m, 2, 45, sub(m, 1, s))
+        }
+        for m in all("(收款|到账|入账)[^\\d\\-−¥￥\\n]{0,10}[-−]?[ \\t]*[¥￥]?[ \\t]*([\\d,]+(?:\\.\\d{1,2})?)", s) {
+            push(m, 2, 105, sub(m, 1, s))
         }
 
         // 2) 银行短信：人民币 XXX / 支出 XXX 元
@@ -231,7 +247,8 @@ enum BillParser {
 
         let top = list[0]
         let others = list.dropFirst().prefix(5).filter { $0.w >= 15 }.map { $0.v }.filter { $0 != top.v }
-        return (top.v, top.w, others)
+        // kind 带出去：调用方靠它判断「这个数是不是优惠前的原价」
+        return (top.v, top.w, others, top.note)
     }
 
     // MARK: - 收 / 支
@@ -349,6 +366,22 @@ enum BillParser {
         return ""
     }
 
+    /// 优惠 / 立减 / 满减 / 红包抵扣 / 折扣 的金额合计。
+    ///
+    /// 账单里这几个数本来不是为了记账，但差额全在这儿：
+    /// 「订单金额 84.00、优惠 1.45、实付 82.55」—— 只抄到 84.00 就多记了 1.45。
+    /// 两个用途：① 实付没读到时从原价里减掉；② 写进备注，对账时能解释差额。
+    static func detectDiscount(_ text: String) -> Double {
+        let flat = text.replacingOccurrences(of: "[ \\t]+", with: " ", options: .regularExpression)
+        let s = flat as NSString
+        var sum = 0.0
+        for m in all("(?:优惠|立减|满减|折扣|红包抵扣|抵扣|减免|随机减|券)[^\\d\\-−¥￥\\n]{0,10}[-−]?[ \\t]*[¥￥]?[ \\t]*([\\d,]+(?:\\.\\d{1,2})?)", s) {
+            let raw = sub(m, 1, s).replacingOccurrences(of: ",", with: "")
+            if let v = Double(raw), v > 0, v < 10_000 { sum += v }
+        }
+        return min(sum, 9_999)
+    }
+
     private static func tidy(_ s: String) -> String {
         var t = s.replacingOccurrences(of: "^[：:\\s\\-−]+", with: "", options: .regularExpression)
         t = t.replacingOccurrences(of: "[：:\\s\\-−,，。]+$", with: "", options: .regularExpression)
@@ -460,13 +493,30 @@ enum BillParser {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
 
-        let amt = extractAmount(text)
+        var amt = extractAmount(text)
         let merchant = extractMerchant(text, lines: lines)
         let type = detectType(text, merchant)
         let cat = detectCategory(text + " " + merchant, type: type)
         let ts = detectDate(text)
         let method = detectMethod(text)
-        let note = detectNote(lines)
+
+        // 优惠：实付金额没读到、只读到「订单金额/原价」时，减去优惠才是真花出去的钱。
+        // 读到实付就信实付（实付已经是优惠后的数，不能再减一次）。
+        let discount = detectDiscount(text)
+        var adjustedFromGross = false
+        if discount > 0, amt.amount > discount,
+           !has(finalKwInline, text),
+           has(grossKwInline, amt.kind) {
+            amt.amount = ((amt.amount - discount) * 100).rounded() / 100
+            adjustedFromGross = true
+        }
+
+        var note = detectNote(lines)
+        if discount > 0 {
+            let d = "优惠 ¥" + String(format: "%.2f", discount)
+            let tail = adjustedFromGross ? "（已从原价扣掉）" : ""
+            note = note.isEmpty ? d + tail : d + tail + " · " + note
+        }
 
         var conf = 0
         if amt.amount > 0 {

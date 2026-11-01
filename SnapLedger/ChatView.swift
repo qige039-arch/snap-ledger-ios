@@ -380,11 +380,7 @@ struct ChatView: View {
                     .padding(.horizontal, 12)
                     .cardStyle(padding: 0, radius: 14)
                     .padding(.horizontal, 16)
-                    .contextMenu {
-                        Button(role: .destructive) { remove(r) } label: {
-                            Label("删除这笔账", systemImage: "trash")
-                        }
-                    }
+                    // 长按删除由 RecordLine 内部统一提供，这里不再重复挂
             }
 
         case .shot(_, let rid):
