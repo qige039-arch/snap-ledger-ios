@@ -275,7 +275,11 @@ final class ScanCoordinator: ObservableObject {
             return
         }
 
-        let bill = BillParser.analyze(text)
+        // 把家里成员的名字带进去：账单「付款方式」那行常写着持卡人
+        // （支付宝亲情卡会写成「亲情卡(…(杨慧丽))」），认出来就直接归给那个人，
+        // 不用一律记成「我」。
+        let memberNames = LedgerStore.shared.db.members.map { $0.name }
+        let bill = BillParser.analyze(text, members: memberNames)
         guard bill.amount > 0 else {
             Self.recordDiag(source: source, result: "读到文字但没认出金额")
             say("文字读到了，但没认出金额（可能是余额页或不常见的版式）。手动说一句「午饭 32」更快", keep: 14)
@@ -288,6 +292,11 @@ final class ScanCoordinator: ObservableObject {
         // 快捷指令额外传的备注合并进去而不是覆盖掉它。
         if let note, !note.isEmpty {
             rec.note = rec.note.isEmpty ? note : note + " · " + rec.note
+        }
+        // 解析器给的是名字，账本里存的是 FamilyMember.id，这里翻译一次
+        if rec.member.isEmpty, !bill.member.isEmpty,
+           let m = LedgerStore.shared.db.members.first(where: { $0.name == bill.member }) {
+            rec.member = m.id
         }
         if rec.member.isEmpty { rec.member = LedgerStore.shared.selfMemberId }
         let saved = LedgerStore.shared.add(rec)

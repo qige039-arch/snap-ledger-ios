@@ -278,7 +278,128 @@ enum BillParser {
 
     private static let merchantHint = "(店|超市|商城|餐厅|饭店|咖啡|茶|便利|药房|药店|医院|诊所|公司|科技|有限|集团|中心|广场|酒店|宾馆|馆|行|社|部|局|站|场|院|城|汇|轩|苑|坊|铺|屋|吧|会所|俱乐部|work|store|shop|coffee|cafe)"
 
-    private static let skipLine = "(微信支付|支付宝|云闪付|账单|详情|订单号|交易号|支付时间|付款方式|支付方式|到账时间|服务|客服|协议|隐私|查看更多|当前状态|支付成功|付款成功|已付款|退款|账户|尾号|余额|商品|完成|返回|确定|取消)"
+    private static let skipLine = "(微信支付|支付宝|云闪付|账单|详情|订单号|交易号|支付时间|付款方式|支付方式|到账时间|服务|客服|协议|隐私|查看更多|当前状态|支付成功|付款成功|已付款|退款|账户|尾号|余额|商品|完成|返回|确定|取消|添加|请选择|未选择)"
+
+    // MARK: 商户全称 → 用户认识的那个牌子
+    //
+    // 账单里的商户字段几乎永远是工商全称：「无锡惠山山姆零售有限公司」「星巴克咖啡（上海）有限公司」。
+    // 原样放进账本，列表里就是一行看不懂的公文 —— 用户要的是「山姆」两个字。
+    //
+    // 左边是规范名，右边是能在全称里认出来的写法。长别名要先试，否则
+    // 「沃尔玛山姆会员店」会被「沃尔玛」抢走。品牌顺序也有讲究：越容易误伤的放越后。
+    private static let brandTable: [(name: String, aliases: [String])] = [
+        ("山姆", ["沃尔玛山姆", "山姆会员", "山姆", "samsclub", "sam's club", "sams club"]),
+        ("开市客", ["开市客", "costco"]),
+        ("盒马", ["盒马鲜生", "盒马"]),
+        ("沃尔玛", ["沃尔玛", "walmart"]),
+        ("华润万家", ["华润万家"]),
+        ("大润发", ["大润发", "rt-mart"]),
+        ("家乐福", ["家乐福", "carrefour"]),
+        ("永辉", ["永辉超市", "永辉"]),
+        ("物美", ["物美"]),
+        ("胖东来", ["胖东来"]),
+        ("罗森", ["罗森", "lawson"]),
+        ("全家", ["全家便利", "全家"]),
+        ("7-11", ["7-11", "711", "7-eleven"]),
+        ("美宜佳", ["美宜佳"]),
+        ("星巴克", ["星巴克", "starbucks"]),
+        ("瑞幸", ["瑞幸", "luckin"]),
+        ("库迪", ["库迪"]),
+        ("蜜雪冰城", ["蜜雪冰城", "蜜雪"]),
+        ("喜茶", ["喜茶"]),
+        ("奈雪", ["奈雪的茶", "奈雪"]),
+        ("茶百道", ["茶百道"]),
+        ("古茗", ["古茗"]),
+        ("麦当劳", ["麦当劳", "mcdonald"]),
+        ("肯德基", ["肯德基", "kfc"]),
+        ("汉堡王", ["汉堡王", "burger king"]),
+        ("必胜客", ["必胜客", "pizza hut"]),
+        ("海底捞", ["海底捞"]),
+        ("优衣库", ["优衣库", "uniqlo"]),
+        ("无印良品", ["无印良品", "muji"]),
+        ("名创优品", ["名创优品", "miniso"]),
+        ("宜家", ["宜家家居", "宜家", "ikea"]),
+        ("迪卡侬", ["迪卡侬", "decathlon"]),
+        ("屈臣氏", ["屈臣氏", "watsons"]),
+        ("小米", ["小米之家", "小米"]),
+        ("华为", ["华为"]),
+        ("苹果", ["apple store", "苹果零售", "苹果贸易"]),
+        ("苏宁", ["苏宁"]),
+        ("国美", ["国美"]),
+        ("京东", ["京东"]),
+        ("天猫", ["天猫"]),
+        ("淘宝", ["淘宝"]),
+        ("拼多多", ["拼多多"]),
+        ("美团", ["美团"]),
+        ("饿了么", ["饿了么"]),
+        ("滴滴", ["滴滴"]),
+        ("顺丰", ["顺丰"]),
+        ("中国移动", ["中国移动", "移动通信"]),
+        ("中国联通", ["中国联通", "联通"]),
+        ("中国电信", ["中国电信"]),
+        ("中石化", ["中国石化", "中石化", "sinopec"]),
+        ("中石油", ["中国石油", "中石油"]),
+        ("万达", ["万达"]),
+        ("万象城", ["万象城"]),
+        ("大悦城", ["大悦城"])
+    ]
+
+    /// 工商后缀，从长到短剥。不剥的话账本里全是「XX有限公司」。
+    private static let corpSuffix = ["股份有限公司", "有限责任公司", "有限公司", "分公司", "公司",
+                                     "连锁", "商贸", "实业", "企业管理", "商业管理", "零售"]
+
+    /// 常见省市前缀。只在名字还很长时才剥，剥完不足 2 字就作罢 ——
+    /// 「南京大排档」不能被剥成「大排档」，那反而更难认。
+    private static let regionPrefix = ["中国", "内蒙古", "黑龙江", "江苏", "浙江", "广东", "山东", "河南",
+                                       "河北", "湖北", "湖南", "四川", "福建", "安徽", "江西", "陕西",
+                                       "山西", "辽宁", "吉林", "云南", "贵州", "广西", "甘肃", "海南",
+                                       "上海", "北京", "天津", "重庆", "深圳", "广州", "杭州", "南京",
+                                       "苏州", "无锡", "常州", "宁波", "成都", "武汉", "西安", "长沙",
+                                       "郑州", "青岛", "济南", "合肥", "福州", "厦门", "南昌", "昆明",
+                                       "沈阳", "大连", "哈尔滨", "长春", "石家庄", "太原", "南宁", "贵阳"]
+
+    /// 在全称里找品牌。命中返回规范短名，没有返回 nil。
+    private static func matchBrand(_ raw: String) -> String? {
+        let t = raw.lowercased()
+            .replacingOccurrences(of: "[\\s（）()·•,，。、\\-—_]", with: "", options: .regularExpression)
+        guard t.count >= 2 else { return nil }
+        for (name, aliases) in brandTable {
+            for a in aliases.sorted(by: { $0.count > $1.count }) where t.contains(a.lowercased()) {
+                return name
+            }
+        }
+        return nil
+    }
+
+    /// 商户名归一。已经是个短名字（「美团外卖」「肯德基」）就原样放过 ——
+    /// 归并只会丢信息；只有像公文的全称才值得提炼。
+    private static func refineMerchant(_ raw: String) -> String {
+        let base = tidy(raw)
+        if base.isEmpty { return "" }
+        let looksCorporate = base.count >= 6 || corpSuffix.contains { base.hasSuffix($0) }
+        guard looksCorporate else { return base }
+
+        if let b = matchBrand(base) { return b }
+
+        var s = base
+        for suf in corpSuffix where s.count - suf.count >= 2 && s.hasSuffix(suf) {
+            s = String(s.dropLast(suf.count))
+        }
+        if let b = matchBrand(s) { return b }
+
+        // 剥完还很长，才去猜前面的城市
+        if s.count > 6 {
+            for p in regionPrefix.sorted(by: { $0.count > $1.count }) where s.hasPrefix(p) {
+                let rest = String(s.dropFirst(p.count))
+                if rest.count >= 2 { s = rest; break }
+            }
+            for suf in corpSuffix where s.count - suf.count >= 2 && s.hasSuffix(suf) {
+                s = String(s.dropLast(suf.count))
+            }
+        }
+        if let b = matchBrand(s) { return b }
+        return s.isEmpty ? base : String(s.prefix(16))
+    }
 
     static func extractMerchant(_ text: String, lines: [String]) -> String {
         let flat = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
@@ -298,7 +419,7 @@ enum BillParser {
                 let v = sub(m, 1, s)
                 if v.isEmpty { continue }
                 if ["微信", "支付宝", "零钱", "余额", "银行卡", "支付", "收款"].contains(v) { continue }
-                return tidy(v)
+                return refineMerchant(v)
             }
         }
 
@@ -311,7 +432,7 @@ enum BillParser {
                looksLikeName(L),
                !has("^[\\d\\s.,:：¥￥\\-−+/]+$", L),
                !has(skipLine, L) {
-                return tidy(L)
+                return refineMerchant(L)
             }
         }
 
@@ -321,7 +442,7 @@ enum BillParser {
                   "商户[：:\\s]*([^\\s，,。；;]{2,24})"] {
             for m in all(p, s) {
                 let v = sub(m, 1, s)
-                if !v.isEmpty { return tidy(v) }
+                if !v.isEmpty { return refineMerchant(v) }
             }
         }
 
@@ -335,7 +456,7 @@ enum BillParser {
             if !looksLikeName(L) { continue }
             if has(merchantHint, L), L.count > bestLine.count { bestLine = L }
         }
-        return bestLine.isEmpty ? "" : tidy(bestLine)
+        return bestLine.isEmpty ? "" : refineMerchant(bestLine)
     }
 
     /// OCR 行是否「像商户名」。状态栏垃圾（！.4G0、11:16、HD、5G）和纯符号行必须挡掉：
@@ -353,14 +474,19 @@ enum BillParser {
 
     /// 「商品 / 订单信息 / 备注」这类字段抓出来做备忘 —— 账单截图里现成写着，
     /// 不抓白不抓。没有就返回空串。
-    static func detectNote(_ lines: [String]) -> String {
+    ///
+    /// merchant 传进来是为了去重：支付宝的「商品说明」经常就是门店名
+    /// （山姆这张写的是「无锡北山姆」），提炼后跟商户一样，写进备注纯属噪音。
+    static func detectNote(_ lines: [String], merchant: String = "") -> String {
         let keys = ["商品说明", "订单信息", "商品", "备注", "说明"]
-        for L in lines {
+        lineLoop: for L in lines {
             for k in keys where L.hasPrefix(k) {
                 let rest = L.dropFirst(k.count)
-                guard let first = rest.first, first == "：" || first == ":" || first == " " else { continue }
+                guard let first = rest.first, first == "：" || first == ":" || first == " " else { continue lineLoop }
                 let s = String(rest).trimmingCharacters(in: CharacterSet(charactersIn: "：: "))
-                if s.count >= 2, s.count <= 40, !has(skipLine, s) { return s }
+                if s.count < 2 || s.count > 40 || has(skipLine, s) { continue lineLoop }
+                if !merchant.isEmpty, let b = matchBrand(s), b == merchant { continue lineLoop }
+                return s
             }
         }
         return ""
@@ -374,7 +500,8 @@ enum BillParser {
     private static let sceneRules: [(String, [String])] = [
         ("停车", ["停车", "泊车", "车位", "停车费"]),
         ("加油", ["加油", "汽油", "柴油", "中石化", "中石油", "壳牌", "充电桩"]),
-        ("买菜", ["超市", "生鲜", "菜市场", "菜场", "果蔬", "蔬果", "农贸", "粮油"]),
+        ("超市", ["超市", "日用百货", "会员店", "仓储", "卖场", "山姆", "开市客", "costco"]),
+        ("买菜", ["生鲜", "菜市场", "菜场", "果蔬", "蔬果", "农贸", "粮油"]),
         ("吃饭", ["餐厅", "饭店", "餐饮", "外卖", "食堂", "小吃", "火锅", "烧烤", "快餐", "咖啡", "奶茶"]),
         ("买药", ["药房", "药店", "医药", "诊所", "医院", "门诊"]),
         ("看电影", ["电影", "影院", "影城"]),
@@ -420,6 +547,28 @@ enum BillParser {
     }
 
     // MARK: - 类别
+
+    /// 账单页自己标的分类（支付宝「账单分类 日用百货」、微信「交易分类」）。
+    /// 这是收单侧标的，比我们按关键词猜准 —— 猜出来是「购物」，人家标的是「日用百货」。
+    private static let declaredCategoryMap: [(key: String, name: String)] = [
+        ("日用百货", "日用"), ("食品酒饮", "餐饮"), ("餐饮美食", "餐饮"), ("酒店旅游", "娱乐"),
+        ("交通出行", "交通"), ("服饰装扮", "购物"), ("数码电器", "购物"), ("美容美发", "购物"),
+        ("母婴亲子", "购物"), ("文化休闲", "娱乐"), ("运动户外", "娱乐"), ("医疗健康", "医疗"),
+        ("住房物业", "居住"), ("生活服务", "居住"), ("家居家装", "居住"), ("通讯缴费", "通讯"),
+        ("教育培训", "学习"), ("转账红包", "人情"), ("宠物", "宠物"), ("汽车相关", "交通")
+    ]
+
+    static func detectDeclaredCategory(_ lines: [String]) -> String? {
+        for L in lines {
+            for k in ["账单分类", "交易分类", "消费分类", "账单类别"] where L.hasPrefix(k) {
+                let rest = String(L.dropFirst(k.count))
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "：: "))
+                guard !rest.isEmpty else { continue }
+                for (key, name) in declaredCategoryMap where rest.contains(key) { return name }
+            }
+        }
+        return nil
+    }
 
     static func detectCategory(_ text: String, type: String) -> BillCategory {
         let pool = type == "income" ? incomeCategories : expenseCategories
@@ -507,6 +656,25 @@ enum BillParser {
     // MARK: - 支付方式
 
     static func detectMethod(_ text: String) -> String {
+        // 先看「付款方式」那一行。支付宝账单里「收单机构 支付宝支付科技有限公司」也带
+        // 「支付宝」三个字，按老顺序会先命中它 —— 于是亲情卡付的钱被记成「支付宝」。
+        // 付款方式这行才是钱的出处，优先级必须最高。
+        let s = text as NSString
+        for m in all("(?:付款方式|支付方式|扣款方式)[：:\\s]*([^\\n]{0,28})", s) {
+            let v = sub(m, 1, s).lowercased()
+            if v.isEmpty { continue }
+            if v.contains("亲情卡") || v.contains("亲属卡") { return "亲情卡" }
+            if v.contains("花呗") { return "花呗" }
+            if v.contains("白条") { return "白条" }
+            if v.contains("零钱") { return "微信" }
+            if v.contains("信用卡") { return "信用卡" }
+            if v.contains("余额宝") { return "支付宝" }
+            if v.contains("储蓄卡") || v.contains("银行卡") || v.contains("银行") { return "银行卡" }
+            if v.contains("云闪付") { return "云闪付" }
+            if v.contains("余额") { return "余额" }
+            if v.contains("现金") { return "现金" }
+        }
+
         if text.contains("云闪付") { return "云闪付" }
         if text.contains("花呗") { return "花呗" }
         if has("(微信支付|零钱|微信)", text) { return "微信" }
@@ -516,9 +684,31 @@ enum BillParser {
         return ""
     }
 
+    /// 从账单里认人。付款方式那行常带着持卡人 —— 支付宝亲情卡写成
+    /// 「亲情卡(头发乱了honey(杨慧丽))」，名字正好是家里某个成员就归给他，
+    /// 比一律记成「我」准确得多。
+    static func detectMember(_ text: String, members: [String]) -> String {
+        let pool = members.filter { !$0.isEmpty }.sorted { $0.count > $1.count }
+        guard !pool.isEmpty else { return "" }
+
+        // 单字名（「我」「妈」）全文匹配等于瞎猜 —— 任何一句话都可能撞上，只在付款方式行里认。
+        let s = text as NSString
+        let payLine = all("(?:付款方式|支付方式|扣款方式|持卡人)[：:\\s]*([^\\n]{0,30})", s)
+            .map { sub($0, 1, s) }.joined()
+
+        for nm in pool {
+            if nm.count >= 2 {
+                if text.contains(nm) { return nm }
+            } else if payLine.contains(nm) {
+                return nm
+            }
+        }
+        return ""
+    }
+
     // MARK: - 主入口：整段账单文字
 
-    static func analyze(_ rawText: String) -> ParsedBill {
+    static func analyze(_ rawText: String, members: [String] = []) -> ParsedBill {
         let text = rawText.replacingOccurrences(of: "\r", with: "")
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -527,9 +717,16 @@ enum BillParser {
         var amt = extractAmount(text)
         let merchant = extractMerchant(text, lines: lines)
         let type = detectType(text, merchant)
-        let cat = detectCategory(text + " " + merchant, type: type)
+        var cat = detectCategory(text + " " + merchant, type: type)
+        // 账单页自己标了分类就信它。「日用百货」按关键词会被算成「购物」（都命中 2 个字），
+        // 但收单侧标的那个才是用户心里的账。
+        if type == "expense", let declared = detectDeclaredCategory(lines),
+           let hit = expenseCategories.first(where: { $0.name == declared }) {
+            cat = hit
+        }
         let ts = detectDate(text)
         let method = detectMethod(text)
+        let member = detectMember(text, members: members)
 
         // 优惠：实付金额没读到、只读到「订单金额/原价」时，减去优惠才是真花出去的钱。
         // 读到实付就信实付（实付已经是优惠后的数，不能再减一次）。
@@ -547,7 +744,7 @@ enum BillParser {
         var parts: [String] = []
         let scene = detectScene(text + " " + merchant)
         if !scene.isEmpty { parts.append(scene) }
-        let goods = detectNote(lines)
+        let goods = detectNote(lines, merchant: merchant)
         if !goods.isEmpty { parts.append(goods) }
         if discount > 0 {
             parts.append("优惠 ¥" + String(format: "%.2f", discount) + (adjustedFromGross ? "（已扣）" : ""))
@@ -572,7 +769,7 @@ enum BillParser {
                           ts: ts,
                           method: method,
                           note: note,
-                          member: "",
+                          member: member,
                           confidence: conf,
                           lines: lines)
     }

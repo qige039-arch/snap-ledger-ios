@@ -616,7 +616,8 @@ struct ChatView: View {
     }
 
     private func handleOCR(_ text: String) {
-        let bill = BillParser.analyze(text)
+        let names = store.db.members.map { $0.name }
+        let bill = BillParser.analyze(text, members: names)
         if bill.amount <= 0 {
             items.append(.text(id: UUID().uuidString, mine: false,
                                body: "截图读到了，但没认出金额。可能是余额页或不常见的版式，手动说一句更快。"))
@@ -627,6 +628,12 @@ struct ChatView: View {
 
     private func confirm(id: String, bill: ParsedBill, book: String? = nil) {
         var rec = bill.toRecord(source: bill.lines.count > 1 ? "ocr" : "chat")
+        // 解析器给的是名字（「老婆」「杨慧丽」），账本里存的是 FamilyMember.id。
+        // 不翻译这一步，成员列会存进一个永远匹配不上的名字，界面只能显示「成员」。
+        if !bill.member.isEmpty,
+           let m = store.db.members.first(where: { $0.name == bill.member }) {
+            rec.member = m.id
+        }
         if rec.member.isEmpty { rec.member = store.selfMemberId }
         if let book, !book.isEmpty { rec.book = book }
         let saved = store.add(rec)

@@ -105,6 +105,55 @@ final class ParserTests: XCTestCase {
         }
     }
 
+    // MARK: 支付宝账单详情（全称归并 / 分类采信 / 付款方式 / 认人）
+    //
+    // 山姆这张一屏里埋了四个坑：
+    // ① 商户字段是工商全称「无锡惠山山姆零售有限公司」，原样显示在账本里没法看；
+    // ② 「商品说明 无锡北山姆」其实是门店名，跟商户重复，当备注是噪音；
+    // ③ 「收单机构 支付宝支付科技有限公司」会把付款方式盖成「支付宝」；
+    // ④ 账单自己标了「日用百货」，按关键词会被算成「购物」（两个词各命中 2 字，先到先得）。
+
+    private let alipayShot = """
+    账单详情
+    无锡惠山山姆零售有限公司
+    445.20
+    交易成功
+    支付时间 2026-11-01 17:08:21
+    付款方式 亲情卡(头发乱了honey(杨慧丽))
+    商品说明 无锡北山姆
+    支付奖励 立即领取54积分
+    收单机构 支付宝支付科技有限公司
+    更多
+    账单管理
+    账单分类 日用百货
+    标签 请选择
+    计入收支
+    备注 添加
+    """
+
+    func testAlipayFullDetails() {
+        let r = BillParser.analyze(alipayShot, members: ["杨慧丽", "我"])
+        XCTAssertEqual(r.amount, 445.20, accuracy: 0.001, "金额")
+        XCTAssertEqual(r.merchant, "山姆", "工商全称要归并成品牌")
+        XCTAssertEqual(r.category, "日用", "采信账单自带的「日用百货」")
+        XCTAssertEqual(r.method, "亲情卡", "付款方式不能被收单机构盖掉")
+        XCTAssertEqual(r.member, "杨慧丽", "亲情卡持卡人是家里成员就归他")
+        XCTAssertEqual(r.note, "超市", "门店名跟商户重复，备注只留场景")
+        XCTAssertEqual(r.type, "expense", "收支方向")
+    }
+
+    func testShortMerchantIsNotMerged() {
+        // 已经是好名字就别动 —— 归并只会丢信息，这是不能回归的一条
+        XCTAssertEqual(BillParser.analyze("美团外卖\n-32.50\n支付成功").merchant, "美团外卖")
+        XCTAssertEqual(BillParser.analyze("肯德基\n-45.00\n交易成功").merchant, "肯德基")
+    }
+
+    func testNoteIsNotAButtonLabel() {
+        // 「备注 添加」里的「添加」是按钮文案，不是备注内容
+        let r = BillParser.analyze("肯德基\n-45.00\n备注 添加")
+        XCTAssertFalse(r.note.contains("添加"), "按钮文案不能当备注")
+    }
+
     // MARK: 口语短句
 
     private struct QuickCase {
