@@ -617,13 +617,22 @@ struct ChatView: View {
 
     private func handleOCR(_ text: String) {
         let names = store.db.members.map { $0.name }
-        let bill = BillParser.analyze(text, members: names)
-        if bill.amount <= 0 {
+        // 一屏多条的截图（支付宝搜索交易记录）要出多张待确认卡片，
+        // 不能只取第一笔 —— 用户手动选图，就是想一次把整屏理清楚。
+        let bills = BillParser.analyzeAll(text, members: names).filter { $0.amount > 0 }
+        if bills.isEmpty {
             items.append(.text(id: UUID().uuidString, mine: false,
                                body: "截图读到了，但没认出金额。可能是余额页或不常见的版式，手动说一句更快。"))
             return
         }
-        items.append(.card(id: UUID().uuidString, bill: bill, savedId: nil))
+        if bills.count > 1 {
+            let total = bills.reduce(0) { $0 + $1.amount }
+            items.append(.text(id: UUID().uuidString, mine: false,
+                               body: "这张图里认出 \(bills.count) 笔，合计 \(Money.currency(total))。逐条点「记上」入账，认错的划掉就行。"))
+        }
+        for bill in bills {
+            items.append(.card(id: UUID().uuidString, bill: bill, savedId: nil))
+        }
     }
 
     private func confirm(id: String, bill: ParsedBill, book: String? = nil) {

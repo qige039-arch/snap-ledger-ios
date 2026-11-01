@@ -278,46 +278,70 @@ final class ScanCoordinator: ObservableObject {
         // 把家里成员的名字带进去：账单「付款方式」那行常写着持卡人
         // （支付宝亲情卡会写成「亲情卡(…(杨慧丽))」），认出来就直接归给那个人，
         // 不用一律记成「我」。
+        //
+        // 一张图可能是「交易列表」而不是单笔详情（支付宝搜索交易记录一屏十几条），
+        // analyzeAll 会先按金额切块、再逐块解析 —— 单笔图照样只出一条。
         let memberNames = LedgerStore.shared.db.members.map { $0.name }
-        let bill = BillParser.analyze(text, members: memberNames)
-        guard bill.amount > 0 else {
+        let bills = BillParser.analyzeAll(text, members: memberNames).filter { $0.amount > 0 }
+        guard !bills.isEmpty else {
             Self.recordDiag(source: source, result: "读到文字但没认出金额")
             say("文字读到了，但没认出金额（可能是余额页或不常见的版式）。手动说一句「午饭 32」更快", keep: 14)
             return
         }
 
-        var rec = bill.toRecord(source: "intent")
-        rec.book = ScanSettings.resolvedBook()
-        // bill.note 里已经是「场景 · 商品 · 优惠」的提炼结果，
-        // 快捷指令额外传的备注合并进去而不是覆盖掉它。
-        if let note, !note.isEmpty {
-            rec.note = rec.note.isEmpty ? note : note + " · " + rec.note
+        // 多笔时逐条入账。缩略图只挂第一笔：同一张图在聊天里铺五遍，
+        // 只会把列表撑得看不清 —— 用户要的是「这张图记了几笔」，不是五张一样的图。
+        var saved: [LedgerRecord] = []
+        for (idx, bill) in bills.enumerated() {
+            var rec = bill.toRecord(source: "intent")
+            rec.book = ScanSettings.resolvedBook()
+            // 快捷指令额外传的备注只并给第一笔：多笔场景那句话描述的是整张图
+            if idx == 0, let note, !note.isEmpty {
+                rec.note = rec.note.isEmpty ? note : note + " · " + rec.note
+            }
+            // 解析器给的是名字，账本里存的是 FamilyMember.id，这里翻译一次
+            if rec.member.isEmpty, !bill.member.isEmpty,
+               let m = LedgerStore.shared.db.members.first(where: { $0.name == bill.member }) {
+                rec.member = m.id
+            }
+            if rec.member.isEmpty { rec.member = LedgerStore.shared.selfMemberId }
+            let r = LedgerStore.shared.add(rec)
+            saved.append(r)
+            if idx == 0 {
+                // 截图本身铺进聊天流（用户要的就是「截图发在聊天框」）：
+                // 存在本 App 沙盒，不进系统相册，只留缩略图。
+                ScanArchive.saveChatShot(image, recordId: r.id)
+            }
         }
-        // 解析器给的是名字，账本里存的是 FamilyMember.id，这里翻译一次
-        if rec.member.isEmpty, !bill.member.isEmpty,
-           let m = LedgerStore.shared.db.members.first(where: { $0.name == bill.member }) {
-            rec.member = m.id
-        }
-        if rec.member.isEmpty { rec.member = LedgerStore.shared.selfMemberId }
-        let saved = LedgerStore.shared.add(rec)
         SyncEngine.shared.now()
 
-        // 截图本身铺进聊天流（用户要的就是「截图发在聊天框」）：
-        // 存在本 App 沙盒，不进系统相册，只留缩略图。
-        ScanArchive.saveChatShot(image, recordId: saved.id)
+        guard !saved.isEmpty else {
+            Self.recordDiag(source: source, result: "解析出错")
+            say("这张图没记上，再试一次；还不行把图发我", keep: 12)
+            return
+        }
 
-        pendingRecordIds.append(saved.id)
-        Self.recordDiag(source: source, result: "已记账 \(Money.currency(saved.amount))")
+        pendingRecordIds.append(contentsOf: saved.map { $0.id })
         if let fp {
             UserDefaults.standard.set(fp, forKey: Self.fingerprintKey)
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.fingerprintTsKey)
         }
+
+        if saved.count > 1 {
+            let total = saved.reduce(0) { $0 + $1.amount }
+            Self.recordDiag(source: source, result: "已记账 \(saved.count) 笔")
+            say("这张图里认出 \(saved.count) 笔，合计 \(Money.currency(total))，都已入账。认错的点开改", keep: 16)
+            return
+        }
+
+        let only = saved[0]
+        Self.recordDiag(source: source, result: "已记账 \(Money.currency(only.amount))")
         // 非今天的账单（按支付时间入账）必须点明记在了哪天，
         // 否则用户在账本「今天」里翻不到，会以为没记上。
-        let sameDay = Calendar.current.isDateInToday(Date(timeIntervalSince1970: saved.ts / 1000))
+        let sameDay = Calendar.current.isDateInToday(Date(timeIntervalSince1970: only.ts / 1000))
         say(sameDay
-            ? "已记账 · \(saved.category) \(Money.currency(saved.amount))，点一下能改，长按或左滑可删"
-            : "已记账 · \(Money.currency(saved.amount)) · 按账单时间记在 \(Fmt.md(saved.ts))，账本翻到那天能看到", keep: 12)
+            ? "已记账 · \(only.category) \(Money.currency(only.amount))，点一下能改，长按或左滑可删"
+            : "已记账 · \(Money.currency(only.amount)) · 按账单时间记在 \(Fmt.md(only.ts))，账本翻到那天能看到", keep: 12)
     }
 
     private static let fingerprintKey = "snap.scan.fp"

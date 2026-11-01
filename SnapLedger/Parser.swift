@@ -774,6 +774,186 @@ enum BillParser {
                           lines: lines)
     }
 
+    // MARK: - 一屏多条：交易列表
+
+    /// 列表里的一笔（切块中间产物）
+    private struct ListBlock {
+        var lines: [String]
+        var month: Int?
+    }
+
+    /// 单笔详情页的强特征。命中 2 个以上就绝不当成列表。
+    ///
+    /// 详情页也会同时出现「实付 82.55 / 订单金额 84.00 / 优惠 1.45」三个数，
+    /// 不挡的话会被切成三笔假账 —— 这比漏记更难收拾。
+    private static let detailMarkers = ["交易单号", "订单号", "商户单号", "支付时间", "付款时间",
+                                        "付款方式", "支付方式", "商品说明", "账单详情", "收款方",
+                                        "收单机构", "交易成功", "创建时间", "交易分类"]
+
+    /// 一屏多条的入口。
+    ///
+    /// 支付宝/微信的「搜索交易记录」是一屏十几条，每条一行「商户 … 金额」。
+    /// 老逻辑把整屏当一张账单交给 extractAmount，它只取权重最高的那个数 ——
+    /// 结果十几笔只入一笔，而且往往是金额最大的那笔，其余全丢。
+    ///
+    /// 切不出 2 笔以上时退回单笔逻辑，行为与以前完全一致。
+    static func analyzeAll(_ rawText: String, members: [String] = []) -> [ParsedBill] {
+        let text = rawText.replacingOccurrences(of: "\r", with: "")
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+
+        let markers = detailMarkers.filter { text.contains($0) }.count
+        guard markers < 2 else { return [analyze(text, members: members)] }
+
+        let blocks = splitList(lines)
+        // 商户名全一样说明只是同一笔被切碎了（比如「商户 / 金额 / 优惠」三行），
+        // 不是列表 —— 退回单笔。
+        let names = Set(blocks.compactMap { $0.lines.first })
+        guard blocks.count >= 2, names.count >= 2 else {
+            return [analyze(text, members: members)]
+        }
+
+        var out: [ParsedBill] = []
+        var seen = Set<String>()
+        let cal = Calendar.current
+        let curMonth = cal.component(.month, from: Date())
+
+        for b in blocks {
+            var bill = analyze(b.lines.joined(separator: "\n"), members: members)
+            guard bill.amount > 0 else { continue }
+
+            // 列表里每条只有「商户 + 金额」，没有日期。月份分组标题是唯一线索：
+            // 「10月」分组里的那几笔不能全记到今天，否则账本里翻不到。
+            if !hasDateMark(b.lines), let mo = b.month, mo != curMonth,
+               let ts = monthFallback(mo) {
+                bill.ts = ts
+            }
+
+            // 同一屏里完全相同的「类型 + 商户 + 金额」只留一笔：
+            // OCR 偶尔会把一行读两遍。真有两笔一模一样的情况极少，用户手动补更快。
+            let k = "\(bill.type)|\(bill.merchant)|" + String(format: "%.2f", bill.amount)
+            if seen.contains(k) { continue }
+            seen.insert(k)
+            out.append(bill)
+        }
+
+        // 切出来的笔数不合理就退回单笔，让用户用一句话记 ——
+        // 宁可少记一笔，也不能往账本里灌一堆碎账。
+        guard out.count >= 2, out.count <= 30 else {
+            return [analyze(text, members: members)]
+        }
+        return out
+    }
+
+    /// 以「金额」为锚往回攒商户名。
+    ///
+    /// 支持两种版式：金额和商户同一行（`林氏家居 13.80`），以及金额单独一行
+    /// （OCR 常把右对齐的数字拆出来）。汇总行和月份分组只当上下文，不入账。
+    private static func splitList(_ lines: [String]) -> [ListBlock] {
+        var out: [ListBlock] = []
+        var buf: [String] = []
+        var month: Int?
+
+        for raw in lines {
+            let t = raw.trimmingCharacters(in: .whitespaces)
+            guard !t.isEmpty else { continue }
+
+            // 「11月」「11月 支出 ¥0.00 收入 ¥0.00」整行都是分组头，后面那半是汇总，一起丢
+            if let mo = monthHeader(t) { month = mo; buf.removeAll(); continue }
+            if isSummaryRow(t) { buf.removeAll(); continue }
+
+            if let tail = trailingAmount(t) {
+                if tail.name.count >= 2 { buf.append(tail.name) }
+                if !buf.isEmpty {
+                    out.append(ListBlock(lines: buf + [String(format: "%.2f", tail.value)],
+                                         month: month))
+                    buf = []
+                }
+                continue
+            }
+
+            if let solo = soloAmount(t) {
+                if !buf.isEmpty {
+                    out.append(ListBlock(lines: buf + [String(format: "%.2f", solo)],
+                                         month: month))
+                    buf = []
+                }
+                continue
+            }
+
+            // 攒不住的东西（页头、说明）不能无限堆：留最近 3 行就够定位商户
+            buf.append(t)
+            if buf.count > 3 { buf.removeFirst() }
+        }
+        return out
+    }
+
+    /// 「11月」/「2026年11月」；后面允许跟空白（跟了汇总字段的那行也算分组头）
+    private static func monthHeader(_ t: String) -> Int? {
+        let s = t as NSString
+        guard let m = all("^(?:20\\d{2}\\s*年\\s*)?(\\d{1,2})\\s*月(?:\\s|$)", s).first else { return nil }
+        let mo = Int(sub(m, 1, s)) ?? 0
+        return (1...12).contains(mo) ? mo : nil
+    }
+
+    /// 汇总行：支出 / 收入 / 结余 / 本月已省 / 笔数 …（这些数不是任何一笔账）
+    private static let summaryWords = ["支出", "收入", "结余", "本月已省", "已省", "笔数",
+                                       "合计", "总计", "预算", "余额", "全部"]
+    private static func isSummaryRow(_ t: String) -> Bool {
+        if summaryWords.contains(where: { t.hasPrefix($0) }) { return true }
+        // 「全部 支出 收入」这类筛选 tab 栏：整行拆开全是汇总词，也该丢
+        let toks = t.split(whereSeparator: { " \t·|｜/".contains($0) }).map(String.init)
+        if !toks.isEmpty, toks.allSatisfy({ summaryWords.contains($0) }) { return true }
+        return false
+    }
+
+    /// 行尾是金额：`林氏家居旗舰店 13.80` / `无锡山姆 ¥445.20`
+    ///
+    /// 前缀里带两位以上数字的（日期、单号）不算 —— 那不是商户名。
+    private static func trailingAmount(_ t: String) -> (name: String, value: Double)? {
+        let s = t as NSString
+        guard let m = all("^(.*?)[\\s¥￥:：]*[¥￥]?\\s*([\\d,]{1,7}\\.\\d{1,2})\\s*元?$", s).first
+        else { return nil }
+        var name = sub(m, 1, s).trimmingCharacters(in: .whitespaces)
+        guard let v = Double(sub(m, 2, s).replacingOccurrences(of: ",", with: "")), v > 0
+        else { return nil }
+        if has("\\d{2,}", name) { return nil }
+        // 去掉行尾的省略号、箭头、括号这类装饰
+        while let l = name.last, "…·．.>）》」』-—–:：*".contains(l) { name.removeLast() }
+        return (name.trimmingCharacters(in: .whitespaces), v)
+    }
+
+    /// 整行只有一个金额：`13.80` / `¥445.20` / `-30.00`
+    private static func soloAmount(_ t: String) -> Double? {
+        let s = t as NSString
+        guard let m = all("^[+\\-−]?\\s*[¥￥]?\\s*([\\d,]{1,7}\\.\\d{1,2})$", s).first else { return nil }
+        let v = Double(sub(m, 1, s).replacingOccurrences(of: ",", with: "")) ?? 0
+        return v > 0 ? v : nil
+    }
+
+    /// 这一块里有没有自带日期（有就信它，别再拿月份分组兜底）
+    private static func hasDateMark(_ lines: [String]) -> Bool {
+        let p = "(\\d{1,2}\\s*月\\s*\\d{1,2}\\s*日|\\d{1,2}[-/]\\d{1,2}\\s+\\d{1,2}[:：]\\d{2}|昨天|前天|今天|\\d{1,2}[:：]\\d{2})"
+        return lines.contains { has(p, $0) }
+    }
+
+    /// 只有月份、没有日：落到那个月的最后一天中午。
+    /// 比起「记到今天」，这样至少能在账本里翻到正确的月份。
+    private static func monthFallback(_ mo: Int) -> Double? {
+        let cal = Calendar.current
+        let now = Date()
+        var y = cal.component(.year, from: now)
+        // 1 月里看到「12月」的分组，那是去年
+        if mo > cal.component(.month, from: now) { y -= 1 }
+        guard let first = cal.date(from: DateComponents(year: y, month: mo, day: 1)),
+              let next = cal.date(byAdding: .month, value: 1, to: first),
+              let last = cal.date(byAdding: .day, value: -1, to: next) else { return nil }
+        var c = cal.dateComponents([.year, .month, .day], from: last)
+        c.hour = 12
+        return cal.date(from: c)?.timeIntervalSince1970 * 1000
+    }
+
     // MARK: - 口语短句
 
     private static let incomeHint = "(工资|薪资|发薪|奖金|提成|年终|报销|退款|退回|收到|进账|入账|到账|利息|分红|收益|中奖|卖了个|转我)"

@@ -154,6 +154,59 @@ final class ParserTests: XCTestCase {
         XCTAssertFalse(r.note.contains("添加"), "按钮文案不能当备注")
     }
 
+    // MARK: 一屏多条（支付宝「搜索交易记录」）
+    //
+    // 这种图是一屏十几条，每条一行「商户 … 金额」。以前整屏丢给 extractAmount，
+    // 它只取权重最高的那个数 —— 十几笔只入一笔，而且往往是金额最大的那笔。
+
+    private let listShot = """
+    搜索交易记录
+    全部 支出 收入
+    11月
+    支出 ¥0.00
+    收入 ¥0.00
+    本月已省 ¥42.3
+    林氏家居旗舰店 13.80
+    林氏家居华南旗舰店 14.90
+    无锡山姆会员商店 445.20
+    诺斯清(北京)医疗器械 7.01
+    10月
+    支出 ¥2.18
+    收入 ¥0.00
+    """
+
+    func testListShotSplitsIntoMultiple() {
+        let bills = BillParser.analyzeAll(listShot)
+        XCTAssertEqual(bills.count, 4, "一屏四条就该出四条")
+        let expect: [Double] = [13.80, 14.90, 445.20, 7.01]
+        for (a, e) in zip(bills.map { $0.amount }, expect) {
+            XCTAssertEqual(a, e, accuracy: 0.001, "金额要逐条对上，不能只取最大的那个")
+        }
+        XCTAssertEqual(bills[2].merchant, "山姆", "全称照样归并成品牌")
+        XCTAssertTrue(bills.allSatisfy { $0.type == "expense" }, "列表里的支出别判成收入")
+    }
+
+    func testListDoesNotStealDetailPage() {
+        // 详情页会同时出现「实付 / 订单金额 / 优惠」三个数，绝不能被切成一笔一笔
+        XCTAssertEqual(BillParser.analyzeAll(alipayShot, members: ["杨慧丽"]).count, 1,
+                       "单笔详情页不能被切成多笔")
+    }
+
+    func testListMonthFallback() {
+        let shot = """
+        10月
+        无锡山姆会员商店 445.20
+        京东自营 88.00
+        """
+        let bills = BillParser.analyzeAll(shot)
+        XCTAssertEqual(bills.count, 2)
+        for b in bills {
+            let m = Calendar.current.component(.month,
+                                              from: Date(timeIntervalSince1970: b.ts / 1000))
+            XCTAssertEqual(m, 10, "分组是 10 月，不能全记到今天")
+        }
+    }
+
     // MARK: 口语短句
 
     private struct QuickCase {
