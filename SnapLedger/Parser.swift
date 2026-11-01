@@ -951,7 +951,10 @@ enum BillParser {
               let last = cal.date(byAdding: .day, value: -1, to: next) else { return nil }
         var c = cal.dateComponents([.year, .month, .day], from: last)
         c.hour = 12
-        return cal.date(from: c)?.timeIntervalSince1970 * 1000
+        // 注意：不能写成 `cal.date(from: c)?.timeIntervalSince1970 * 1000` ——
+        // 可选链出来的是 TimeInterval?，乘号用不了，编译直接报「must be unwrapped」。
+        guard let day = cal.date(from: c) else { return nil }
+        return day.timeIntervalSince1970 * 1000
     }
 
     // MARK: - 口语短句
