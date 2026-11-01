@@ -292,6 +292,47 @@ struct EmojiBadge: View {
 
 // MARK: - 小标签
 
+/// 成员头像：暖色渐变底 + 青绿到橙的细圆环 + 一点柔和投影。
+///
+/// 原来就是一个纯 emoji 塞进圆角方块，放在「我的」那张青绿渐变卡上显得很平。
+/// 加环和底之后，同一个 emoji 也能看出「这是个人」，两三个成员并排时区分度更好。
+struct MemberAvatar: View {
+    let emoji: String
+    var size: CGFloat = 44
+    /// 放在深色/渐变卡上时用半透明白底，避免暖色底和卡片撞色
+    var translucent: Bool = false
+
+    private var ring: LinearGradient {
+        LinearGradient(
+            colors: translucent
+                ? [.white.opacity(0.85), .white.opacity(0.35)]
+                : [Theme.brand.opacity(0.55), Color.dynamic(light: 0xF5A05E, dark: 0xD98B47).opacity(0.6)],
+            startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+
+    private var fill: LinearGradient {
+        LinearGradient(
+            colors: translucent
+                ? [.white.opacity(0.30), .white.opacity(0.14)]
+                : [Color.dynamic(light: 0xFFF3E2, dark: 0x332B24),
+                   Color.dynamic(light: 0xFDFBF7, dark: 0x262220)],
+            startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+
+    var body: some View {
+        ZStack {
+            Circle().fill(fill)
+            Circle().strokeBorder(ring, lineWidth: max(1.4, size * 0.05))
+            Text(emoji)
+                .font(.system(size: size * 0.5))
+                .shadow(color: .black.opacity(0.10), radius: size * 0.03, y: size * 0.02)
+        }
+        .frame(width: size, height: size)
+        .shadow(color: translucent ? .black.opacity(0.10) : Theme.brand.opacity(0.12),
+                radius: size * 0.10, y: size * 0.03)
+    }
+}
+
 struct TagView: View {
     let text: String
     var color: Color = Theme.ink2

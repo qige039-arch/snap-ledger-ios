@@ -366,6 +366,37 @@ enum BillParser {
         return ""
     }
 
+    /// 账单里能看出来的「场景」：买菜、停车、加油、吃饭……
+    ///
+    /// 用户要的不是一屏 OCR 原文，而是一眼能认出的那句话；所以只做「命中才写」，
+    /// 猜不出来就留空，别硬编一个。商户名已经单独成字段（列表里当标题），
+    /// 这里补的是「在干嘛」。
+    private static let sceneRules: [(String, [String])] = [
+        ("停车", ["停车", "泊车", "车位", "停车费"]),
+        ("加油", ["加油", "汽油", "柴油", "中石化", "中石油", "壳牌", "充电桩"]),
+        ("买菜", ["超市", "生鲜", "菜市场", "菜场", "果蔬", "蔬果", "农贸", "粮油"]),
+        ("吃饭", ["餐厅", "饭店", "餐饮", "外卖", "食堂", "小吃", "火锅", "烧烤", "快餐", "咖啡", "奶茶"]),
+        ("买药", ["药房", "药店", "医药", "诊所", "医院", "门诊"]),
+        ("看电影", ["电影", "影院", "影城"]),
+        ("话费", ["话费", "流量", "营业厅", "移动通信", "宽带费"]),
+        ("缴费", ["水费", "电费", "燃气费", "物业费", "供暖费", "取暖费"]),
+        ("打车", ["滴滴", "打车", "出租车", "网约车", "曹操", "t3出行"]),
+        ("出行", ["地铁", "公交", "高铁", "火车", "12306", "机票"]),
+        ("快递", ["快递", "顺丰", "菜鸟驿站", "京东物流"]),
+        ("房租", ["房租", "租金"]),
+        ("学费", ["学费", "培训", "课程", "辅导班"]),
+        ("宠物", ["宠物", "猫粮", "狗粮", "猫砂", "宠物医院"]),
+        ("网购", ["淘宝", "天猫", "京东商城", "拼多多", "抖音电商"])
+    ]
+
+    static func detectScene(_ text: String) -> String {
+        let t = " " + text.lowercased() + " "
+        for (label, keys) in sceneRules where keys.contains(where: { t.contains($0.lowercased()) }) {
+            return label
+        }
+        return ""
+    }
+
     /// 优惠 / 立减 / 满减 / 红包抵扣 / 折扣 的金额合计。
     ///
     /// 账单里这几个数本来不是为了记账，但差额全在这儿：
@@ -511,12 +542,18 @@ enum BillParser {
             adjustedFromGross = true
         }
 
-        var note = detectNote(lines)
+        // 备注 = 场景 · 商品/订单信息 · 优惠。
+        // 顺序按「用户最想知道」排：先是在干嘛，再是买了啥，最后才是优惠了多少钱。
+        var parts: [String] = []
+        let scene = detectScene(text + " " + merchant)
+        if !scene.isEmpty { parts.append(scene) }
+        let goods = detectNote(lines)
+        if !goods.isEmpty { parts.append(goods) }
         if discount > 0 {
-            let d = "优惠 ¥" + String(format: "%.2f", discount)
-            let tail = adjustedFromGross ? "（已从原价扣掉）" : ""
-            note = note.isEmpty ? d + tail : d + tail + " · " + note
+            parts.append("优惠 ¥" + String(format: "%.2f", discount) + (adjustedFromGross ? "（已扣）" : ""))
         }
+        var note = parts.joined(separator: " · ")
+        if note.count > 60 { note = String(note.prefix(60)) }
 
         var conf = 0
         if amt.amount > 0 {

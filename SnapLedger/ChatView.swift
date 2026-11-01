@@ -68,6 +68,8 @@ struct ChatView: View {
     /// 回执轮询：Intent 的 perform 在 App 变 active **之后**才跑，
     /// 它写的回执晚于 onAppear / scenePhase 这两个钩子。开个 30 秒的短轮询接住。
     @State private var receiptTask: Task<Void, Never>?
+    /// 点聊天里的截图看大图
+    @State private var previewShot: ShotPreview?
     @FocusState private var inputFocused: Bool
 
     private var monthTotals: (income: Double, expense: Double) {
@@ -191,6 +193,9 @@ struct ChatView: View {
                     .presentationDetents([.large])
                     .presentationDragIndicator(.visible)
             }
+        }
+        .fullScreenCover(item: $previewShot) { p in
+            ShotPreviewView(preview: p, onDelete: { removeRecordById(p.recordId) })
         }
     }
 
@@ -387,13 +392,27 @@ struct ChatView: View {
             if let img = ScanArchive.chatShot(recordId: rid) {
                 HStack(alignment: .top, spacing: 8) {
                     assistantAvatar
-                    Image(uiImage: img)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxWidth: 190, maxHeight: 250)
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .strokeBorder(Theme.line, lineWidth: 0.7))
+                    // 点一下看大图：缩略图只有 190 宽，认错的账得能看清原图才敢改
+                    Button {
+                        previewShot = ShotPreview(image: img, recordId: rid)
+                    } label: {
+                        Image(uiImage: img)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: 190, maxHeight: 250)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .strokeBorder(Theme.line, lineWidth: 0.7))
+                            .overlay(alignment: .bottomTrailing) {
+                                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .padding(5)
+                                    .background(.black.opacity(0.35), in: Circle())
+                                    .padding(6)
+                            }
+                    }
+                    .buttonStyle(.plain)
                     Spacer(minLength: 30)
                 }
                 .padding(.horizontal, 16)
@@ -544,18 +563,13 @@ struct ChatView: View {
         sync.bootstrap()
 
         if items.isEmpty {
-            // 重新打开时把最近的账目铺回来：能看到、能点开改、也能直接删。
-            // 之前只给 6 条而且只读，用户会以为「记完就删不掉了」。
-            let recent = Array(store.sortedRecords.prefix(30).reversed())
-            if !recent.isEmpty {
-                items.append(.text(id: "recent", mine: false,
-                                   body: "最近 \(recent.count) 笔（\(store.currentBook?.name ?? "家庭账本")）。左滑一条可以删除，点一下能改。"))
-                for r in recent {
-                    items.append(.record(id: "h\(r.id)", recordId: r.id))
-                }
-            }
+            // 聊天框只承载「这一次」的记账过程。
+            //
+            // 以前每次冷启动会把最近 30 笔铺回来，用户看到的是一屏历史记录 ——
+            // 他要的是「记完就过去，聊天框保持干净」。历史本来就在「账本」页，
+            // 这里没必要再摊一遍，冷启动从问候语开始。
             items.append(.text(id: "welcome", mine: false,
-                               body: "说一句话就能记，比如「午饭 32」「老婆买菜 86」。"))
+                               body: "说一句话就能记，比如「午饭 32」「老婆买菜 86」。以前的账都在「账本」里。"))
 
             items.append(.tip(id: "tip1",
                               body: "付款界面直接双击手机背面：快捷指令把截图直接递给本 App（不经过相册，相册里不会多出图），我认出金额就记上。没记上时点左下角相册按钮手动选。"))
@@ -635,6 +649,11 @@ struct ChatView: View {
     }
 
     // MARK: 删除 / 撤销
+
+    private func removeRecordById(_ id: String) {
+        guard let r = store.db.records.first(where: { $0.id == id }) else { return }
+        remove(r)
+    }
 
     private func remove(_ r: LedgerRecord) {
         store.delete(id: r.id)
@@ -895,6 +914,110 @@ struct AllRecordsSheet: View {
             await MainActor.run {
                 withAnimation(.easeOut(duration: 0.2)) { undoRecord = nil }
             }
+        }
+    }
+}
+
+// MARK: - 看大图
+
+struct ShotPreview: Identifiable {
+    let id = UUID()
+    let image: UIImage
+    let recordId: String
+}
+
+/// 全屏看原截图。
+///
+/// 聊天里的缩略图压到 190 宽（原图长边 900），金额认错了得能看清原始账单的
+/// 小字才敢改，所以给一个全屏视图：双指缩放、双击放大、下拉关掉。
+struct ShotPreviewView: View {
+    let preview: ShotPreview
+    var onDelete: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var scale: CGFloat = 1
+    @State private var lastScale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
+    @State private var confirmDelete = false
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            Image(uiImage: preview.image)
+                .resizable()
+                .scaledToFit()
+                .scaleEffect(scale)
+                .offset(offset)
+                .gesture(
+                    MagnificationGesture()
+                        .onChanged { v in scale = min(4, max(1, lastScale * v)) }
+                        .onEnded { _ in
+                            lastScale = scale
+                            if scale <= 1.01 { withAnimation(.easeOut(duration: 0.2)) { offset = .zero; lastOffset = .zero } }
+                        }
+                )
+                .simultaneousGesture(
+                    DragGesture()
+                        .onChanged { g in
+                            guard scale > 1.01 else { return }
+                            offset = CGSize(width: lastOffset.width + g.translation.width,
+                                            height: lastOffset.height + g.translation.height)
+                        }
+                        .onEnded { _ in lastOffset = offset }
+                )
+                .onTapGesture(count: 2) {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        scale = scale > 1.01 ? 1 : 2
+                        lastScale = scale
+                        if scale == 1 { offset = .zero; lastOffset = .zero }
+                    }
+                }
+                .ignoresSafeArea()
+
+            VStack {
+                HStack {
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 34, height: 34)
+                            .background(.white.opacity(0.16), in: Circle())
+                    }
+                    Spacer()
+                    Button {
+                        confirmDelete = true
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 34, height: 34)
+                            .background(.white.opacity(0.16), in: Circle())
+                    }
+                }
+                .padding(.horizontal, 18)
+                .padding(.top, 8)
+
+                Spacer()
+
+                Text("双指缩放 · 双击放大")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .padding(.bottom, 26)
+            }
+        }
+        .confirmationDialog("删除这笔账？", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("删除", role: .destructive) {
+                dismiss()
+                // 稍等一下再删，免得 sheet 收起动画里列表突然少一行
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { onDelete() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("连同这张截图一起删掉。")
         }
     }
 }

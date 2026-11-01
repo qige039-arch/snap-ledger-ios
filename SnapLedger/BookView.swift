@@ -742,12 +742,17 @@ struct RecordEditor: View {
     @State private var showDeleteConfirm = false
     @State private var loaded = false
     @State private var hint: String?
+    @State private var showAddCategory = false
 
     private let cols = [GridItem(.adaptive(minimum: 74), spacing: 8)]
     private let methods = ["支付宝", "微信", "银行卡", "现金", "其他"]
 
     private var categories: [BillCategory] {
-        isIncome ? BillParser.incomeCategories : BillParser.expenseCategories
+        let base = isIncome ? BillParser.incomeCategories : BillParser.expenseCategories
+        // 自定义分类排在后面：内置的够用，用户加的只在需要时点
+        let custom = CategoryStore.all(type: isIncome ? "income" : "expense")
+            .map { BillCategory(name: $0.name, emoji: $0.emoji, keywords: []) }
+        return base + custom
     }
 
     var body: some View {
@@ -938,6 +943,7 @@ struct RecordEditor: View {
                     Text(c.name)
                         .font(.system(size: 11.5, weight: on ? .semibold : .regular))
                         .foregroundStyle(on ? Theme.brand : Theme.ink2)
+                        .lineLimit(1)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 9)
@@ -953,7 +959,53 @@ struct RecordEditor: View {
                     category = c.name
                     emoji = c.emoji
                 }
+                // 自定义分类长按可删（内置的不拦，免得误删基础分类）
+                .contextMenu {
+                    if CategoryStore.isCustom(name: c.name) {
+                        Button(role: .destructive) {
+                            if let id = CategoryStore.all(type: isIncome ? "income" : "expense")
+                                .first(where: { $0.name == c.name })?.id {
+                                CategoryStore.remove(id: id)
+                            }
+                            if category == c.name { category = "其他"; emoji = "📦" }
+                        } label: {
+                            Label("删除这个分类", systemImage: "trash")
+                        }
+                    }
+                }
             }
+
+            // 末尾的「+」：新增分类入口。放在选择器里而不是设置页 ——
+            // 用户是在「要记这笔账、发现没合适分类」的这一刻才想起来加的。
+            Button {
+                showAddCategory = true
+            } label: {
+                VStack(spacing: 4) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 17, weight: .medium))
+                    Text("新增")
+                        .font(.system(size: 11.5))
+                }
+                .foregroundStyle(Theme.ink3)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 9)
+                .background(Theme.card2, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(Theme.line, style: StrokeStyle(lineWidth: 0.7, dash: [3.5, 3]))
+                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+        .sheet(isPresented: $showAddCategory) {
+            AddCategorySheet(type: isIncome ? "income" : "expense") { name, emoji in
+                guard CategoryStore.add(name: name, emoji: emoji,
+                                        type: isIncome ? "income" : "expense") else { return }
+                category = name
+                self.emoji = emoji
+            }
+            .presentationDetents([.medium, .large])
         }
     }
 

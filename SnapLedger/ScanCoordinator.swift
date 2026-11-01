@@ -284,7 +284,11 @@ final class ScanCoordinator: ObservableObject {
 
         var rec = bill.toRecord(source: "intent")
         rec.book = ScanSettings.resolvedBook()
-        if let note, !note.isEmpty { rec.note = note }
+        // bill.note 里已经是「场景 · 商品 · 优惠」的提炼结果，
+        // 快捷指令额外传的备注合并进去而不是覆盖掉它。
+        if let note, !note.isEmpty {
+            rec.note = rec.note.isEmpty ? note : note + " · " + rec.note
+        }
         if rec.member.isEmpty { rec.member = LedgerStore.shared.selfMemberId }
         let saved = LedgerStore.shared.add(rec)
         SyncEngine.shared.now()

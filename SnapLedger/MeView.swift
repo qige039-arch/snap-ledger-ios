@@ -111,11 +111,7 @@ struct MeView: View {
         let me = store.selfMember
         return VStack(spacing: 14) {
             HStack(spacing: 13) {
-                Text(me?.emoji ?? "🙂")
-                    .font(.system(size: 27))
-                    .frame(width: 54, height: 54)
-                    .background(.white.opacity(0.22),
-                                in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                MemberAvatar(emoji: me?.emoji ?? "🙂", size: 58, translucent: true)
 
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 5) {
@@ -498,7 +494,7 @@ struct MeView: View {
                 ForEach(store.db.members) { m in
                     let on = m.id == store.selfMemberId
                     HStack(spacing: 5) {
-                        Text(m.emoji).font(.system(size: 14))
+                        MemberAvatar(emoji: m.emoji, size: 24)
                         Text(m.name)
                             .font(.system(size: 13, weight: on ? .semibold : .regular))
                             .foregroundStyle(on ? Theme.brand : Theme.ink2)
@@ -528,9 +524,12 @@ struct MeView: View {
                         .font(.system(size: 13.5))
                         .foregroundStyle(Theme.ink)
                     Spacer()
-                    Text("\(store.selfMember?.emoji ?? "🙂") \(store.selfMember?.name ?? "我")")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Theme.ink3)
+                    HStack(spacing: 6) {
+                        MemberAvatar(emoji: store.selfMember?.emoji ?? "🙂", size: 22)
+                        Text(store.selfMember?.name ?? "我")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Theme.ink3)
+                    }
                     Image(systemName: "chevron.right")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.ink3)
@@ -751,14 +750,14 @@ struct MemberSheet: View {
     @State private var emoji = "🙂"
     @State private var loaded = false
 
-    private let emojis = ["🙂", "😀", "😎", "🐱", "🐶", "🐰", "🐻", "🦊", "🐳", "🍀", "🌻", "🍑"]
+    private let emojis = ["🙂", "😊", "😄", "😎", "🥰", "😋", "🤓", "🐱", "🐶", "🐰", "🐻", "🐼", "🦊", "🐯", "🐨", "🐧", "🐳", "🦄", "🐥", "🍀", "🌻", "🍑", "🌸", "⭐️"]
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     VStack(spacing: 10) {
-                        Text(emoji).font(.system(size: 44))
+                        MemberAvatar(emoji: emoji, size: 84)
                         TextField("你的昵称", text: $name)
                             .font(.system(size: 18, weight: .semibold))
                             .multilineTextAlignment(.center)

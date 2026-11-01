@@ -28,6 +28,8 @@ struct StatView: View {
     @State private var chartStyle = 0        // 0 柱状 / 1 曲线
     @State private var breakdownIncome = false
     @State private var sortByAmount = true
+    /// 点开某个分类看明细（按当前日/月/年区间）
+    @State private var drill: CatTotal?
 
     private let scopeTitles = ["日", "月", "年"]
     private let seriesTitles = ["支出", "收入", "结余"]
@@ -103,6 +105,13 @@ struct StatView: View {
             .animation(.easeOut(duration: 0.22), value: anchor)
         }
         .background(Theme.bg)
+        .sheet(item: $drill) { c in
+            CategoryDetailSheet(cat: c,
+                                income: breakdownIncome,
+                                start: range.start,
+                                end: range.end,
+                                scopeTitle: title)
+        }
         .onChange(of: store.currentBookId) { _, _ in anchor = Date() }
     }
 
@@ -651,6 +660,9 @@ struct StatView: View {
             }
         }
         .padding(.vertical, 10)
+        .contentShape(Rectangle())
+        // 点分类进明细：分布图告诉「花在哪」，下一步一定是「哪几笔」
+        .onTapGesture { drill = c }
     }
 
     private var emptyBreakdown: some View {
@@ -664,5 +676,125 @@ struct StatView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 26)
+    }
+}
+
+// MARK: - 分类明细
+
+/// 从「支出/收入分布」点进来：这个分类在当前日 / 月 / 年区间里的每一笔。
+///
+/// 用清单而不是再来一张图 —— 用户点进来是想核对「哪几笔凑成了这个数」，
+/// 所以按天分组、每天给小计，行本身能点开去改。
+struct CategoryDetailSheet: View {
+    let cat: CatTotal
+    let income: Bool
+    let start: Date
+    let end: Date
+    let scopeTitle: String
+
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var store = LedgerStore.shared
+    @State private var editing: LedgerRecord?
+
+    private var list: [LedgerRecord] {
+        store.records(from: start, to: end)
+            .filter { $0.category == cat.name && $0.isIncome == income }
+            .sorted { $0.ts > $1.ts }
+    }
+
+    private var total: Double { list.reduce(0) { $0 + $1.amount } }
+
+    private var groups: [(day: Date, items: [LedgerRecord])] {
+        let cal = Fmt.cal
+        var order: [Date] = []
+        var map: [Date: [LedgerRecord]] = [:]
+        for r in list {
+            let d = cal.startOfDay(for: Date(timeIntervalSince1970: r.ts / 1000))
+            if map[d] == nil { order.append(d) }
+            map[d, default: []].append(r)
+        }
+        return order.map { ($0, map[$0] ?? []) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 12) {
+                    headCard
+
+                    ForEach(Array(groups.enumerated()), id: \.offset) { _, g in
+                        VStack(spacing: 0) {
+                            HStack(spacing: 6) {
+                                Text(Fmt.dayLong(g.day))
+                                    .font(.system(size: 12.5, weight: .medium))
+                                    .foregroundStyle(Theme.ink2)
+                                Spacer(minLength: 4)
+                                Text((income ? "+" : "-") + Money.currency(g.items.reduce(0) { $0 + $1.amount }))
+                                    .font(.system(size: 11.5, design: .rounded))
+                                    .foregroundStyle(Theme.ink3)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.top, 11)
+                            .padding(.bottom, 3)
+
+                            VStack(spacing: 0) {
+                                ForEach(g.items) { r in
+                                    RecordLine(record: r,
+                                               memberName: store.memberName(r.member),
+                                               onTap: { editing = r },
+                                               onDelete: nil)
+                                    if r.id != g.items.last?.id {
+                                        Rectangle().fill(Theme.line)
+                                            .frame(height: 0.7)
+                                            .padding(.leading, 64)
+                                    }
+                                }
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.bottom, 6)
+                        }
+                        .cardStyle(padding: 0)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+            }
+            .background(Theme.bg)
+            .navigationTitle("\(cat.name)明细")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                }
+            }
+            .sheet(item: $editing) { rec in
+                RecordEditor(record: rec)
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
+            }
+        }
+    }
+
+    private var headCard: some View {
+        HStack(spacing: 12) {
+            Text(cat.emoji)
+                .font(.system(size: 21))
+                .frame(width: 46, height: 46)
+                .background(Tint.of(cat.name).opacity(0.14), in: Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("\(scopeTitle) · \(list.count) 笔")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.ink3)
+                Text((income ? "+" : "-") + Money.currency(total))
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(income ? Theme.income : Theme.ink)
+            }
+
+            Spacer(minLength: 4)
+        }
+        .padding(.vertical, 4)
+        .cardStyle()
     }
 }
