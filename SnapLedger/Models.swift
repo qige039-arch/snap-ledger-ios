@@ -373,10 +373,14 @@ final class LedgerStore: ObservableObject {
     }
 
     /// 删账本会连里面的记录一起删（带墓碑，另一台手机同样消失）。
-    /// 最后一个账本不允许删 —— 否则整个界面没有落点。
+    ///
+    /// 以前这里有一道 `guard db.books.count > 1 else { return false }`，
+    /// 界面上又把删除项按同一个条件藏掉了。两边一叠加，结果是「只有一个账本」
+    /// 的用户左滑看不到删除、点了也不会发生任何事 —— 看起来就像这个功能不存在。
+    /// 现在改成：最后一个也能删，删完补一个空账本兜底，界面永远有落点。
     @discardableResult
     func deleteBook(id: String) -> Bool {
-        guard db.books.count > 1 else { return false }
+        guard db.books.contains(where: { $0.id == id }) else { return false }
         let fallback = db.books.first?.id ?? LedgerBook.defaultId
         var doomed: [String] = []
         // 先把 id 收集出来，再一次性删。不能在 removeAll 的闭包里调 self.bookId：
@@ -392,7 +396,18 @@ final class LedgerStore: ObservableObject {
         }
         db.books.removeAll { $0.id == id }
         settleTomb(kind: "b", id: id)
-        if db.currentBook == id {
+
+        // 删光了就补一个空账本。id 固定用 defaultId，两台设备删到最后一个时
+        // 才会落到同一个账本上，而不是各建一个空壳。
+        if db.books.isEmpty {
+            let now = Date().timeIntervalSince1970 * 1000
+            db.books = [LedgerBook(id: LedgerBook.defaultId, name: "家庭账本",
+                                   emoji: "🏠", at: now, createdAt: now)]
+            // 刚给它写过墓碑，这里必须撤掉。不然同步时这个「新建」的账本
+            // 会撞上自己留下的墓碑，被当成已删除的旧账本再删一遍。
+            db.tomb.removeAll { $0.kind == "b" && $0.id == LedgerBook.defaultId }
+        }
+        if !db.books.contains(where: { $0.id == db.currentBook }) {
             db.currentBook = db.books.first?.id ?? LedgerBook.defaultId
         }
         persist()

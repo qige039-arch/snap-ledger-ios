@@ -560,10 +560,18 @@ struct RecordLine: View {
 
     var body: some View {
         ZStack(alignment: .trailing) {
+            rowContent
+            // 删除块必须叠在行内容「之上」。
+            //
+            // 以前它在下层，靠行内容 offset 让开才露出来。只要命中区没跟着位移
+            // （contentShape 的顺序、或者 offset 不参与命中测试），点下去就落到
+            // 行自己的 onTapGesture 上 —— 表现正是「滑出来了、点了却删不掉」。
+            // 放到上层之后，只要露出来就一定能点到，跟位移细节无关。
             if let del = onDelete {
                 deleteButton(del)
+                    .opacity(dx < -6 ? 1 : 0)
+                    .allowsHitTesting(dx < -6)
             }
-            rowContent
         }
         .clipped()
         .onChange(of: rowState.openId) { _, id in
@@ -710,13 +718,16 @@ struct RecordLine: View {
     }
 
     private func handleTap() {
-        guard !dragging else { return }
-        // 已经滑开时，点一下只是收起，不进编辑页
+        // 已经滑开时，点一下只是收起，不进编辑页。
+        // 这条判断放在 dragging 之前：手势若被 ScrollView 收走、onEnded 没回来，
+        // dragging 会卡在 true，那样连「点一下收起」都会失效，行就像被冻住了。
         if rowState.openId == record.id {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) { dx = 0 }
             rowState.openId = nil
+            dragging = false
             return
         }
+        guard !dragging else { return }
         onTap?()
     }
 }
@@ -1139,12 +1150,29 @@ struct RecordEditor: View {
 
 // MARK: - 切换账本
 
+/// 「我的账本」的编辑去向
+///
+/// 以前这个 sheet 上同时挂了 `.sheet(item: $editing)` 和 `.sheet(isPresented: $creating)`
+/// 两个 modifier。同一个视图上多个 sheet 会互相抢 presentation —— 正是 BookView
+/// 顶部注释里踩过的那个坑，表现是「点了新建 / 改名没反应」。合并成一个 route 之后，
+/// 改名和新建走同一扇门，行为确定。
+private enum BookEditorRoute: Identifiable {
+    case edit(LedgerBook)
+    case create
+
+    var id: String {
+        switch self {
+        case .edit(let b): return "edit-" + b.id
+        case .create: return "create"
+        }
+    }
+}
+
 struct BookSwitcherSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var store = LedgerStore.shared
 
-    @State private var editing: LedgerBook?
-    @State private var creating = false
+    @State private var editorRoute: BookEditorRoute?
     @State private var doomed: LedgerBook?
 
     var body: some View {
@@ -1152,46 +1180,17 @@ struct BookSwitcherSheet: View {
             List {
                 Section {
                     ForEach(store.books) { b in
-                        Button {
-                            store.switchBook(b.id)
-                            dismiss()
-                        } label: {
-                            bookRow(b)
-                        }
-                        .buttonStyle(.plain)
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            if store.books.count > 1 {
-                                Button(role: .destructive) {
-                                    doomed = b
-                                } label: {
-                                    Label("删除", systemImage: "trash")
-                                }
-                            }
-                            Button {
-                                editing = b
-                            } label: {
-                                Label("改名", systemImage: "pencil")
-                            }
-                            .tint(Theme.brand)
-                        }
-                        .contextMenu {
-                            Button { editing = b } label: { Label("改名 / 换图标", systemImage: "pencil") }
-                            if store.books.count > 1 {
-                                Button(role: .destructive) { doomed = b } label: {
-                                    Label("删除账本", systemImage: "trash")
-                                }
-                            }
-                        }
+                        row(b)
                     }
                 } header: {
-                    Text("点一下切换，左滑改名或删除")
+                    Text("点一下切换账本")
                 } footer: {
-                    Text("每个账本的记录互不打扰，统计也只统计当前账本。两台手机通过家庭账本同步时，账本本身也会同步过去。")
+                    Text("每个账本的记录互不打扰，统计也只统计当前账本。点每行右侧的 ⋯ 可以改名或删除账本。两台手机通过家庭账本同步时，账本本身也会同步过去。")
                 }
 
                 Section {
                     Button {
-                        creating = true
+                        editorRoute = .create
                     } label: {
                         Label("新建账本", systemImage: "plus.circle.fill")
                             .font(.system(size: 14, weight: .medium))
@@ -1208,11 +1207,11 @@ struct BookSwitcherSheet: View {
                     Button("完成") { dismiss() }
                 }
             }
-            .sheet(item: $editing) { b in
-                BookEditorSheet(book: b)
-            }
-            .sheet(isPresented: $creating) {
-                BookEditorSheet(book: nil)
+            .sheet(item: $editorRoute) { r in
+                switch r {
+                case .edit(let b): BookEditorSheet(book: b)
+                case .create: BookEditorSheet(book: nil)
+                }
             }
             .confirmationDialog(
                 doomed.map { "删除「\($0.name)」？" } ?? "",
@@ -1226,8 +1225,72 @@ struct BookSwitcherSheet: View {
                 Button("取消", role: .cancel) { doomed = nil }
             } message: {
                 if let b = doomed {
-                    Text("里面的 \(store.count(inBook: b.id)) 笔记录会一起删除，另一台手机同步后也会消失。")
+                    Text(deleteMessage(for: b))
                 }
+            }
+        }
+    }
+
+    private func deleteMessage(for b: LedgerBook) -> String {
+        let n = store.count(inBook: b.id)
+        if store.books.count == 1 {
+            return "这是唯一的账本，里面 \(n) 笔记录会一起删除，删完会给你留一个空账本。"
+        }
+        return "里面的 \(n) 笔记录会一起删除，另一台手机同步后也会消失。"
+    }
+
+    /// 一行账本 = 切换按钮 + 右侧常驻的 ⋯ 菜单
+    ///
+    /// 以前删除只挂在左滑和长按上。滑不出来、或者根本不知道要滑，就等于这个功能
+    /// 不存在 —— 而账本删除又比记录删除更隐晦（没有红色块提示）。所以现在每行
+    /// 右侧都放一个看得见的 ⋯，点开就有「改名 / 删除」。左滑和长按继续保留，
+    /// 三条路通同一个动作。
+    private func row(_ b: LedgerBook) -> some View {
+        HStack(spacing: 8) {
+            Button {
+                store.switchBook(b.id)
+                dismiss()
+            } label: {
+                bookRow(b)
+            }
+            .buttonStyle(.plain)
+
+            Menu {
+                Button {
+                    editorRoute = .edit(b)
+                } label: {
+                    Label("改名 / 换图标", systemImage: "pencil")
+                }
+                Button(role: .destructive) {
+                    doomed = b
+                } label: {
+                    Label("删除这个账本", systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 17))
+                    .foregroundStyle(Theme.ink3)
+                    .frame(width: 34, height: 34)
+                    .contentShape(Rectangle())
+            }
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                doomed = b
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+            Button {
+                editorRoute = .edit(b)
+            } label: {
+                Label("改名", systemImage: "pencil")
+            }
+            .tint(Theme.brand)
+        }
+        .contextMenu {
+            Button { editorRoute = .edit(b) } label: { Label("改名 / 换图标", systemImage: "pencil") }
+            Button(role: .destructive) { doomed = b } label: {
+                Label("删除账本", systemImage: "trash")
             }
         }
     }
@@ -1274,6 +1337,7 @@ struct BookEditorSheet: View {
     @State private var name = ""
     @State private var emoji = "🏠"
     @State private var loaded = false
+    @State private var showDeleteConfirm = false
 
     private let emojis = ["🏠", "✈️", "🍜", "🎁", "🏢", "🛒", "🎓", "🐾", "💊", "🚗", "🎉", "💰"]
 
@@ -1339,6 +1403,12 @@ struct BookEditorSheet: View {
                             }
                         }
                     }
+
+                    // 删除放在编辑页里，而不是只藏在列表的左滑上：
+                    // 「想删掉这个账本」的念头，多半是在翻开它、看着它的时候冒出来的。
+                    if book != nil {
+                        deleteBookButton
+                    }
                 }
                 .padding(16)
             }
@@ -1363,7 +1433,45 @@ struct BookEditorSheet: View {
                     emoji = b.emoji
                 }
             }
+            .confirmationDialog(
+                book.map { "删除「\(name.isEmpty ? $0.name : name)」？" } ?? "",
+                isPresented: $showDeleteConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("删除账本和里面的记录", role: .destructive) {
+                    if let b = book { store.deleteBook(id: b.id) }
+                    dismiss()
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                if let b = book {
+                    let n = store.count(inBook: b.id)
+                    Text(store.books.count == 1
+                         ? "这是唯一的账本，里面 \(n) 笔记录会一起删除，删完会给你留一个空账本。"
+                         : "里面的 \(n) 笔记录会一起删除，另一台手机同步后也会消失。")
+                }
+            }
         }
+    }
+
+    private var deleteBookButton: some View {
+        Button {
+            showDeleteConfirm = true
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "trash")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("删除这个账本")
+                    .font(.system(size: 13.5, weight: .medium))
+            }
+            .foregroundStyle(Theme.expense)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 11)
+            .background(Theme.expense.opacity(0.09),
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private func save() {
